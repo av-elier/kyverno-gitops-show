@@ -1,0 +1,32 @@
+{
+  "apiVersion": "infra.acme.io/v1",
+  "kind": "KafkaTopic",
+  "metadata": {
+    "name": "orders.events.v1",
+    "environment": "prod",
+    "labels": {
+      "team": "checkout"
+    }
+  },
+  "spec": {
+    "cluster": "prod-msk-eu",
+    "topicName": "orders.events.v1",
+    "partitions": 12,
+    "replicationFactor": 3,
+    "cleanupPolicy": "delete",
+    "retentionMs": 604800000,
+    "maxMessageBytes": 1048576,
+    "acls": [
+      {
+        "principal": "User:orders-producer",
+        "operation": "WRITE",
+        "permission": "ALLOW"
+      },
+      {
+        "principal": "User:*",
+        "operation": "ALL",
+        "permission": "ALLOW"
+      }
+    ]
+  }
+}

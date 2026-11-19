@@ -1,0 +1,88 @@
+{
+  "after": {
+    "apiVersion": "infra.acme.io/v1",
+    "kind": "PostgresDatabase",
+    "metadata": {
+      "environment": "prod",
+      "labels": {
+        "cost-center": "cc-520",
+        "team": "checkout"
+      },
+      "name": "orders-db"
+    },
+    "spec": {
+      "backupRetentionDays": 21,
+      "encryptionEnabled": true,
+      "engine": "postgres",
+      "engineVersion": "16.4",
+      "instanceClass": "db.m6g.xlarge",
+      "maintenanceWindow": "sun:03:00-sun:04:00",
+      "multiAZ": true,
+      "region": "eu-central-1",
+      "storageGB": 500
+    }
+  },
+  "before": {
+    "apiVersion": "infra.acme.io/v1",
+    "kind": "PostgresDatabase",
+    "metadata": {
+      "environment": "prod",
+      "labels": {
+        "cost-center": "cc-410",
+        "team": "checkout"
+      },
+      "name": "orders-db"
+    },
+    "spec": {
+      "backupRetentionDays": 14,
+      "encryptionEnabled": true,
+      "engine": "postgres",
+      "engineVersion": "16.4",
+      "instanceClass": "db.m6g.large",
+      "maintenanceWindow": "sun:03:00-sun:04:00",
+      "multiAZ": true,
+      "region": "eu-central-1",
+      "storageGB": 200
+    }
+  },
+  "changeTicket": "CHG-9002",
+  "diff": {
+    "changedPaths": [
+      "/metadata/labels/cost-center",
+      "/spec/backupRetentionDays",
+      "/spec/instanceClass",
+      "/spec/storageGB"
+    ],
+    "changes": [
+      {
+        "after": "cc-520",
+        "before": "cc-410",
+        "op": "replace",
+        "path": "/metadata/labels/cost-center"
+      },
+      {
+        "after": 21,
+        "before": 14,
+        "op": "replace",
+        "path": "/spec/backupRetentionDays"
+      },
+      {
+        "after": "db.m6g.xlarge",
+        "before": "db.m6g.large",
+        "op": "replace",
+        "path": "/spec/instanceClass"
+      },
+      {
+        "after": 500,
+        "before": 200,
+        "op": "replace",
+        "path": "/spec/storageGB"
+      }
+    ],
+    "totalChanges": 4
+  },
+  "environment": "prod",
+  "kind": "PostgresDatabase",
+  "operation": "update",
+  "resourcePath": "infra/prod/orders-db.json"
+}

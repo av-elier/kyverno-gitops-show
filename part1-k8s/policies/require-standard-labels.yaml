@@ -1,0 +1,26 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-standard-labels
+  annotations:
+    policies.kyverno.io/title: Require Team and Environment Labels
+    policies.kyverno.io/category: Governance
+    policies.kyverno.io/description: >-
+      Audits Deployments that are missing standard ownership labels ('team' and 'env').
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: check-team-and-env-labels
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+      validate:
+        message: "Deployments should define metadata.labels.team and metadata.labels.env for ownership tracking."
+        pattern:
+          metadata:
+            labels:
+              team: "?*"
+              env: "?*"

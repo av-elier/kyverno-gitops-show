@@ -1,0 +1,76 @@
+{
+  "after": {
+    "apiVersion": "infra.acme.io/v1",
+    "kind": "PostgresDatabase",
+    "metadata": {
+      "environment": "prod",
+      "labels": {
+        "team": "checkout"
+      },
+      "name": "orders-db"
+    },
+    "spec": {
+      "backupRetentionDays": 2,
+      "encryptionEnabled": false,
+      "engine": "postgres",
+      "engineVersion": "16.4",
+      "instanceClass": "db.t4g.micro",
+      "maintenanceWindow": "sun:03:00-sun:04:00",
+      "multiAZ": false,
+      "region": "eu-central-1",
+      "storageGB": 10
+    }
+  },
+  "changeTicket": "",
+  "diff": {
+    "changedPaths": [
+      "/apiVersion",
+      "/kind",
+      "/metadata",
+      "/spec"
+    ],
+    "changes": [
+      {
+        "after": "infra.acme.io/v1",
+        "op": "add",
+        "path": "/apiVersion"
+      },
+      {
+        "after": "PostgresDatabase",
+        "op": "add",
+        "path": "/kind"
+      },
+      {
+        "after": {
+          "environment": "prod",
+          "labels": {
+            "team": "checkout"
+          },
+          "name": "orders-db"
+        },
+        "op": "add",
+        "path": "/metadata"
+      },
+      {
+        "after": {
+          "backupRetentionDays": 2,
+          "encryptionEnabled": false,
+          "engine": "postgres",
+          "engineVersion": "16.4",
+          "instanceClass": "db.t4g.micro",
+          "maintenanceWindow": "sun:03:00-sun:04:00",
+          "multiAZ": false,
+          "region": "eu-central-1",
+          "storageGB": 10
+        },
+        "op": "add",
+        "path": "/spec"
+      }
+    ],
+    "totalChanges": 4
+  },
+  "environment": "prod",
+  "kind": "PostgresDatabase",
+  "operation": "create",
+  "resourcePath": "infra/prod/orders-db.json"
+}

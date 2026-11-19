@@ -1,0 +1,57 @@
+apiVersion: json.kyverno.io/v1alpha1
+kind: ValidatingPolicy
+metadata:
+  name: gitops-diff-guardrails
+spec:
+  rules:
+    - name: require-ticket-for-prod
+      identifier: "metadata.branch"
+      match:
+        all:
+          - summary:
+              hasProdChanges: true
+      assert:
+        all:
+          - message: "Production GitOps changes require a valid changeTicket (CHG-#### or JIRA-####)."
+            check:
+              metadata:
+                (regex_match('^(CHG|JIRA)-[0-9]+$', changeTicket)): true
+
+    - name: forbid-zero-replicas-in-prod
+      identifier: "summary.environments[0]"
+      match:
+        all:
+          - summary:
+              hasProdChanges: true
+      assert:
+        all:
+          - message: "Scaling replicas to 0 in production manifests is forbidden."
+            check:
+              ~.files:
+                (environment == 'prod' && regex_match('(?m)^[[:space:]]*replicas:[[:space:]]*0([[:space:]]|$)', addedText)): false
+
+    - name: forbid-tls-disable-in-prod
+      identifier: "summary.environments[0]"
+      match:
+        all:
+          - summary:
+              hasProdChanges: true
+      assert:
+        all:
+          - message: "Disabling TLS (tlsEnabled: false) in production is forbidden."
+            check:
+              ~.files:
+                (environment == 'prod' && regex_match('(?i)tlsEnabled:[[:space:]]*false', addedText)): false
+
+    - name: forbid-hardcoded-secrets
+      identifier: "metadata.author"
+      match:
+        all:
+          - (summary.totalAdded > `0`): true
+      assert:
+        all:
+          - message: "Added diff lines must not contain hardcoded secrets, tokens, or passwords."
+            check:
+              ~.files:
+                ~.addedLines:
+                  (regex_match('(?i)(ghp_[A-Za-z0-9]{8,}|AKIA[0-9A-Z]{8,}|(password|secret|api_key|token)[[:space:]]*[:=][[:space:]]*["\x27]?[A-Za-z0-9_\\-]{6,})', @)): false

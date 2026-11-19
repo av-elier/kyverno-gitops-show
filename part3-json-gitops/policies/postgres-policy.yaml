@@ -1,0 +1,62 @@
+apiVersion: json.kyverno.io/v1alpha1
+kind: ValidatingPolicy
+metadata:
+  name: postgres-gitops-guardrails
+spec:
+  rules:
+    - name: postgres-prod-create-requirements
+      identifier: "after.metadata.name"
+      match:
+        all:
+          - operation: "create"
+            kind: "PostgresDatabase"
+            environment: "prod"
+      assert:
+        all:
+          - message: "New production PostgresDatabase must allocate at least 50 GB, enable Multi-AZ, encrypt storage, and keep >= 7 days of backups."
+            check:
+              after:
+                spec:
+                  (storageGB != `null` && storageGB >= `50`): true
+                  multiAZ: true
+                  encryptionEnabled: true
+                  (backupRetentionDays != `null` && backupRetentionDays >= `7`): true
+
+    - name: postgres-update-allowed-attributes
+      identifier: "after.metadata.name"
+      match:
+        all:
+          - operation: "update"
+            kind: "PostgresDatabase"
+      assert:
+        all:
+          - message: "PostgresDatabase update may only modify storageGB, instanceClass, backupRetentionDays, maintenanceWindow, or metadata.labels/*."
+            check:
+              diff:
+                ~.changes:
+                  (contains(['/spec/storageGB', '/spec/instanceClass', '/spec/backupRetentionDays', '/spec/maintenanceWindow'], path) || starts_with(path, '/metadata/labels/')): true
+
+    - name: postgres-no-disk-shrink
+      identifier: "after.metadata.name"
+      match:
+        all:
+          - operation: "update"
+            kind: "PostgresDatabase"
+      assert:
+        all:
+          - message: "PostgresDatabase storageGB cannot be decreased or removed after creation (after >= before)."
+            check:
+              (after.spec.storageGB != `null` && before.spec.storageGB != `null` && after.spec.storageGB >= before.spec.storageGB): true
+
+    - name: postgres-prod-backup-floor
+      identifier: "after.metadata.name"
+      match:
+        all:
+          - operation: "update"
+            kind: "PostgresDatabase"
+            environment: "prod"
+      assert:
+        all:
+          - message: "Production PostgresDatabase backupRetentionDays must remain >= 7."
+            check:
+              (after.spec.backupRetentionDays != `null` && after.spec.backupRetentionDays >= `7`): true

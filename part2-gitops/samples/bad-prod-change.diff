@@ -1,0 +1,26 @@
+diff --git a/environments/prod/payments/deployment.yaml b/environments/prod/payments/deployment.yaml
+index 3a91c02..8f22d10 100644
+--- a/environments/prod/payments/deployment.yaml
++++ b/environments/prod/payments/deployment.yaml
+@@ -6,7 +6,9 @@ metadata:
+ spec:
+-  replicas: 3
++  replicas: 0
+   template:
+     spec:
+       containers:
+         - name: payments
+           image: ghcr.io/acme/payments:v2.1.0
++          env:
++            - name: GITHUB_TOKEN
++              value: "ghp_ExampleSecretToken987654"
+diff --git a/environments/prod/payments/ingress.yaml b/environments/prod/payments/ingress.yaml
+index 11c9e01..7c2a9b4 100644
+--- a/environments/prod/payments/ingress.yaml
++++ b/environments/prod/payments/ingress.yaml
+@@ -4,4 +4,4 @@ metadata:
+   name: payments-ingress
+ spec:
+-  tlsEnabled: true
++  tlsEnabled: false
+   host: payments.acme.example

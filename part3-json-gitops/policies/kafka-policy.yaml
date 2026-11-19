@@ -1,0 +1,61 @@
+apiVersion: json.kyverno.io/v1alpha1
+kind: ValidatingPolicy
+metadata:
+  name: kafka-gitops-guardrails
+spec:
+  rules:
+    - name: kafka-update-allowed-attributes
+      identifier: "after.metadata.name"
+      match:
+        all:
+          - operation: "update"
+            kind: "KafkaTopic"
+      assert:
+        all:
+          - message: "KafkaTopic update may only modify partitions, retentionMs, maxMessageBytes, acls/*, or metadata.labels/* (cleanupPolicy and replicationFactor are immutable)."
+            check:
+              diff:
+                ~.changes:
+                  (contains(['/spec/partitions', '/spec/retentionMs', '/spec/maxMessageBytes', '/spec/acls'], path) || starts_with(path, '/spec/acls/') || starts_with(path, '/metadata/labels/')): true
+
+    - name: kafka-no-partition-shrink
+      identifier: "after.metadata.name"
+      match:
+        all:
+          - operation: "update"
+            kind: "KafkaTopic"
+      assert:
+        all:
+          - message: "KafkaTopic partitions cannot be reduced or removed (after.spec.partitions >= before.spec.partitions)."
+            check:
+              (after.spec.partitions != `null` && before.spec.partitions != `null` && after.spec.partitions >= before.spec.partitions): true
+
+    - name: kafka-prod-replication-floor
+      identifier: "after.metadata.name"
+      match:
+        all:
+          - kind: "KafkaTopic"
+            environment: "prod"
+            (operation != 'delete'): true
+      assert:
+        all:
+          - message: "Production KafkaTopic must have replicationFactor >= 3."
+            check:
+              (after.spec.replicationFactor != `null` && after.spec.replicationFactor >= `3`): true
+
+    - name: kafka-prod-acl-guardrails
+      identifier: "after.metadata.name"
+      match:
+        all:
+          - kind: "KafkaTopic"
+            environment: "prod"
+            (operation != 'delete'): true
+            (after.spec.acls != `null`): true
+      assert:
+        all:
+          - message: "Production KafkaTopic ACL entries must not use wildcard principal ('User:*') and may only grant READ, WRITE, or DESCRIBE."
+            check:
+              after:
+                spec:
+                  ~.acls:
+                    (principal != `null` && principal != 'User:*' && contains(['READ', 'WRITE', 'DESCRIBE'], operation)): true

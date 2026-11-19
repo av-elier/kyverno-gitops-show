@@ -1,0 +1,99 @@
+{
+  "after": {
+    "apiVersion": "infra.acme.io/v1",
+    "kind": "KafkaTopic",
+    "metadata": {
+      "environment": "prod",
+      "labels": {
+        "team": "checkout"
+      },
+      "name": "orders.events.v1"
+    },
+    "spec": {
+      "acls": [
+        {
+          "operation": "WRITE",
+          "permission": "ALLOW",
+          "principal": "User:orders-producer"
+        },
+        {
+          "operation": "READ",
+          "permission": "ALLOW",
+          "principal": "User:analytics-reader"
+        }
+      ],
+      "cleanupPolicy": "compact",
+      "cluster": "prod-msk-eu",
+      "maxMessageBytes": 1048576,
+      "partitions": 6,
+      "replicationFactor": 2,
+      "retentionMs": 604800000,
+      "topicName": "orders.events.v1"
+    }
+  },
+  "before": {
+    "apiVersion": "infra.acme.io/v1",
+    "kind": "KafkaTopic",
+    "metadata": {
+      "environment": "prod",
+      "labels": {
+        "team": "checkout"
+      },
+      "name": "orders.events.v1"
+    },
+    "spec": {
+      "acls": [
+        {
+          "operation": "WRITE",
+          "permission": "ALLOW",
+          "principal": "User:orders-producer"
+        },
+        {
+          "operation": "READ",
+          "permission": "ALLOW",
+          "principal": "User:analytics-reader"
+        }
+      ],
+      "cleanupPolicy": "delete",
+      "cluster": "prod-msk-eu",
+      "maxMessageBytes": 1048576,
+      "partitions": 12,
+      "replicationFactor": 3,
+      "retentionMs": 604800000,
+      "topicName": "orders.events.v1"
+    }
+  },
+  "changeTicket": "",
+  "diff": {
+    "changedPaths": [
+      "/spec/cleanupPolicy",
+      "/spec/partitions",
+      "/spec/replicationFactor"
+    ],
+    "changes": [
+      {
+        "after": "compact",
+        "before": "delete",
+        "op": "replace",
+        "path": "/spec/cleanupPolicy"
+      },
+      {
+        "after": 6,
+        "before": 12,
+        "op": "replace",
+        "path": "/spec/partitions"
+      },
+      {
+        "after": 2,
+        "before": 3,
+        "op": "replace",
+        "path": "/spec/replicationFactor"
+      }
+    ],
+    "totalChanges": 3
+  },
+  "environment": "prod",
+  "kind": "KafkaTopic",
+  "operation": "update",
+  "resourcePath": "infra/prod/orders-topic.json"
+}
