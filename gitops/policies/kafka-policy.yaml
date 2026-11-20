@@ -1,0 +1,98 @@
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: kafka-update-allowed-attributes
+spec:
+  validationActions:
+    - Deny
+  evaluation:
+    mode: JSON
+  matchConditions:
+    - name: is-kafka-update
+      expression: "object.operation == 'update' && object.kind == 'KafkaTopic'"
+  variables:
+    - name: changes
+      expression: "object.?diff.?changes.orValue([])"
+    - name: forbidden
+      expression: >-
+        variables.changes != null
+          ? variables.changes.filter(c,
+              !(c.path in ['/spec/partitions', '/spec/retentionMs', '/spec/maxMessageBytes', '/spec/acls'] ||
+                c.path.startsWith('/spec/acls/') ||
+                c.path.startsWith('/metadata/labels/'))
+            ).map(c, c.path)
+          : []
+  validations:
+    - expression: "size(variables.forbidden) == 0"
+      messageExpression: "'KafkaTopic update modified immutable attribute(s): ' + variables.forbidden.join(', ')"
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: kafka-no-partition-shrink
+spec:
+  validationActions:
+    - Deny
+  evaluation:
+    mode: JSON
+  matchConditions:
+    - name: is-kafka-update
+      expression: "object.operation == 'update' && object.kind == 'KafkaTopic'"
+  variables:
+    - name: beforeParts
+      expression: "object.?before.?spec.?partitions.orValue(null)"
+    - name: afterParts
+      expression: "object.?after.?spec.?partitions.orValue(null)"
+  validations:
+    - expression: "variables.beforeParts != null && variables.afterParts != null && variables.afterParts >= variables.beforeParts"
+      messageExpression: >-
+        'KafkaTopic partitions cannot decrease or be removed: ' +
+        (variables.beforeParts != null ? string(variables.beforeParts) : 'missing') + ' -> ' +
+        (variables.afterParts != null ? string(variables.afterParts) : 'missing')
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: kafka-prod-replication-floor
+spec:
+  validationActions:
+    - Deny
+  evaluation:
+    mode: JSON
+  matchConditions:
+    - name: is-prod-kafka-non-delete
+      expression: "object.kind == 'KafkaTopic' && object.environment == 'prod' && object.operation != 'delete'"
+  variables:
+    - name: rf
+      expression: "object.?after.?spec.?replicationFactor.orValue(null)"
+  validations:
+    - expression: "variables.rf != null && variables.rf >= 3"
+      messageExpression: "'Production KafkaTopic replicationFactor is ' + (variables.rf != null ? string(variables.rf) : 'missing') + '; must be >= 3'"
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: kafka-prod-acl-guardrails
+spec:
+  validationActions:
+    - Deny
+  evaluation:
+    mode: JSON
+  matchConditions:
+    - name: is-prod-kafka-with-acls
+      expression: >-
+        object.kind == 'KafkaTopic' &&
+        object.environment == 'prod' &&
+        object.operation != 'delete' &&
+        object.?after.?spec.?acls.orValue(null) != null
+  variables:
+    - name: badAcls
+      expression: >-
+        object.after.spec.acls.filter(a,
+          a.?principal.orValue(null) == null ||
+          a.principal == 'User:*' ||
+          !(a.?operation.orValue('') in ['READ', 'WRITE', 'DESCRIBE'])
+        ).map(a, string(a.?principal.orValue('null')) + ':' + string(a.?operation.orValue('null')))
+  validations:
+    - expression: "size(variables.badAcls) == 0"
+      messageExpression: "'Production KafkaTopic ACL(s) forbid wildcard User:* or non-READ/WRITE/DESCRIBE ops: ' + variables.badAcls.join(', ')"

@@ -1,0 +1,31 @@
+apiVersion: policies.kyverno.io/v1
+kind: MutatingPolicy
+metadata:
+  name: mutate-pod-defaults
+spec:
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["deployments"]
+  mutations:
+    - patchType: JSONPatch
+      jsonPatch:
+        expression: >-
+          (has(object.metadata.labels)
+            ? [JSONPatch{op: "add", path: "/metadata/labels/managed-by", value: "kyverno"}]
+            : [JSONPatch{op: "add", path: "/metadata/labels", value: {"managed-by": "kyverno"}}]) +
+          (has(object.spec.template.spec.securityContext)
+            ? [JSONPatch{op: "add", path: "/spec/template/spec/securityContext/runAsNonRoot", value: true}]
+            : [JSONPatch{op: "add", path: "/spec/template/spec/securityContext", value: {"runAsNonRoot": true}}]) +
+          lists.range(size(object.spec.template.spec.containers)).map(i,
+            has(object.spec.template.spec.containers[i].securityContext)
+              ? JSONPatch{op: "add", path: "/spec/template/spec/containers/" + string(i) + "/securityContext/allowPrivilegeEscalation", value: false}
+              : JSONPatch{op: "add", path: "/spec/template/spec/containers/" + string(i) + "/securityContext", value: {"allowPrivilegeEscalation": false}}
+          ) +
+          lists.range(size(object.spec.template.spec.?initContainers.orValue([]))).map(i,
+            has(object.spec.template.spec.initContainers[i].securityContext)
+              ? JSONPatch{op: "add", path: "/spec/template/spec/initContainers/" + string(i) + "/securityContext/allowPrivilegeEscalation", value: false}
+              : JSONPatch{op: "add", path: "/spec/template/spec/initContainers/" + string(i) + "/securityContext", value: {"allowPrivilegeEscalation": false}}
+          )

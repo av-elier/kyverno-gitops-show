@@ -1,0 +1,23 @@
+apiVersion: policies.kyverno.io/v1
+kind: MutatingPolicy
+metadata:
+  name: mutate-postgres-defaults
+spec:
+  evaluation:
+    mode: JSON
+  matchConditions:
+    - name: is-postgres-missing-defaults
+      expression: >-
+        object.?kind.orValue('') == 'PostgresDatabase' &&
+        has(object.spec) &&
+        (object.spec.?encryptionEnabled.orValue(false) != true || !has(object.spec.maintenanceWindow))
+  mutations:
+    - patchType: JSONPatch
+      jsonPatch:
+        expression: >-
+          (object.spec.?encryptionEnabled.orValue(false) != true
+            ? [JSONPatch{op: "add", path: "/spec/encryptionEnabled", value: true}]
+            : []) +
+          (!has(object.spec.maintenanceWindow)
+            ? [JSONPatch{op: "add", path: "/spec/maintenanceWindow", value: "sun:03:00-sun:04:00"}]
+            : [])

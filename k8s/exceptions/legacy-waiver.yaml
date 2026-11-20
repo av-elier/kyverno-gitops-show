@@ -1,0 +1,17 @@
+apiVersion: policies.kyverno.io/v1
+kind: PolicyException
+metadata:
+  name: legacy-payments-non-root-waiver
+spec:
+  policyRefs:
+    - name: require-non-root
+      kind: ValidatingPolicy
+  expiresAt: "2099-01-01T00:00:00Z"
+  matchConditions:
+    - name: only-legacy-payments
+      expression: "object.metadata.name == 'legacy-payments'"
+  validations:
+    - message: "Waiver for legacy-payments requires annotation security.acme.io/waiver=SEC-#### and readOnlyRootFilesystem=true on all containers."
+      expression: >-
+        object.metadata.?annotations[?'security.acme.io/waiver'].orValue('').matches('^SEC-[0-9]+$') &&
+        object.spec.containers.all(c, c.?securityContext.?readOnlyRootFilesystem.orValue(false) == true)

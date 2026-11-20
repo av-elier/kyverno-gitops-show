@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: legacy-payments
+  namespace: production
+  labels:
+    app: legacy-payments
+    team: checkout
+    env: prod
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: legacy-payments
+  template:
+    metadata:
+      labels:
+        app: legacy-payments
+    spec:
+      containers:
+        - name: app
+          image: ghcr.io/acme/legacy-payments:1.4.2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true

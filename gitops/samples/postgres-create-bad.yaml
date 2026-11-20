@@ -1,0 +1,16 @@
+apiVersion: infra.acme.io/v1
+kind: PostgresDatabase
+metadata:
+  name: orders-db
+  environment: prod
+  labels:
+    team: checkout
+spec:
+  engine: postgres
+  engineVersion: "16.4"
+  region: eu-central-1
+  instanceClass: db.t4g.micro
+  storageGB: 10
+  multiAZ: false
+  encryptionEnabled: false
+  backupRetentionDays: 2

@@ -1,0 +1,50 @@
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: require-standard-labels
+  annotations:
+    policies.kyverno.io/title: Require Team and Environment Labels
+    policies.kyverno.io/category: Governance
+spec:
+  validationActions:
+    - Audit
+  evaluation:
+    background:
+      enabled: true
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["deployments"]
+  variables:
+    - name: missing
+      expression: "['team', 'env'].filter(k, object.metadata.?labels[?k].orValue('') == '')"
+  validations:
+    - expression: "size(variables.missing) == 0"
+      messageExpression: "'Deployment missing required ownership label(s): ' + variables.missing.join(', ')"
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: forbid-prod-scale-to-zero
+  annotations:
+    policies.kyverno.io/title: Forbid Scaling Production Deployments to Zero
+    policies.kyverno.io/category: Reliability
+spec:
+  validationActions:
+    - Deny
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["deployments"]
+  matchConditions:
+    - name: in-production-namespace
+      expression: "object.metadata.?namespace.orValue('') == 'production'"
+  validations:
+    - expression: "!(oldObject.spec.?replicas.orValue(1) > 0 && object.spec.?replicas.orValue(1) == 0)"
+      messageExpression: >-
+        'Cannot scale production Deployment ' + object.metadata.name +
+        ' from ' + string(oldObject.spec.?replicas.orValue(1)) + ' to 0 replicas'

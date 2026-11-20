@@ -1,0 +1,23 @@
+{
+  "apiVersion": "infra.acme.io/v1",
+  "kind": "PostgresDatabase",
+  "metadata": {
+    "name": "orders-db",
+    "environment": "prod",
+    "labels": {
+      "team": "checkout",
+      "cost-center": "cc-520"
+    }
+  },
+  "spec": {
+    "engine": "postgres",
+    "engineVersion": "16.4",
+    "region": "eu-central-1",
+    "instanceClass": "db.m6g.xlarge",
+    "storageGB": 350,
+    "multiAZ": true,
+    "encryptionEnabled": true,
+    "backupRetentionDays": 21,
+    "maintenanceWindow": "sun:03:00-sun:04:00"
+  }
+}

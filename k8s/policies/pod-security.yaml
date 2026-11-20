@@ -1,0 +1,61 @@
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: disallow-mutable-image
+  annotations:
+    policies.kyverno.io/title: Disallow Mutable or Untagged Container Images
+    policies.kyverno.io/category: Security
+spec:
+  validationActions:
+    - Deny
+  evaluation:
+    background:
+      enabled: true
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  variables:
+    - name: containers
+      expression: "object.spec.containers + object.spec.?initContainers.orValue([]) + object.spec.?ephemeralContainers.orValue([])"
+    - name: badImages
+      expression: >-
+        variables.containers.filter(c,
+          !parseImageReference(c.image).containsDigest() &&
+          (parseImageReference(c.image).tag() == '' || parseImageReference(c.image).tag() == 'latest')
+        ).map(c, c.name + '=' + c.image)
+  validations:
+    - expression: "size(variables.badImages) == 0"
+      messageExpression: "'Container image(s) must use an immutable tag or digest: ' + variables.badImages.join(', ')"
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: require-non-root
+  annotations:
+    policies.kyverno.io/title: Require Non-Root and Disallow Privilege Escalation
+    policies.kyverno.io/category: Security
+spec:
+  validationActions:
+    - Deny
+  evaluation:
+    background:
+      enabled: true
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  variables:
+    - name: containers
+      expression: "object.spec.containers + object.spec.?initContainers.orValue([])"
+    - name: escalating
+      expression: "variables.containers.filter(c, c.?securityContext.?allowPrivilegeEscalation.orValue(true) != false).map(c, c.name)"
+  validations:
+    - expression: "object.spec.?securityContext.?runAsNonRoot.orValue(false) == true && size(variables.escalating) == 0"
+      messageExpression: >-
+        'Pod must set securityContext.runAsNonRoot=true and disallow allowPrivilegeEscalation (offending: ' +
+        (size(variables.escalating) > 0 ? variables.escalating.join(', ') : 'pod securityContext') + ')'

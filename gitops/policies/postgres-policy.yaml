@@ -1,0 +1,124 @@
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: postgres-prod-create-requirements
+spec:
+  validationActions:
+    - Deny
+  evaluation:
+    mode: JSON
+  matchConditions:
+    - name: is-prod-postgres-create
+      expression: "object.operation == 'create' && object.kind == 'PostgresDatabase' && object.environment == 'prod'"
+  variables:
+    - name: s
+      expression: "object.?after.?spec.orValue({})"
+    - name: storage
+      expression: "variables.s.?storageGB.orValue(null)"
+    - name: backups
+      expression: "variables.s.?backupRetentionDays.orValue(null)"
+  validations:
+    - expression: >-
+        variables.storage != null && variables.storage >= 50 &&
+        variables.s.?multiAZ.orValue(false) == true &&
+        variables.s.?encryptionEnabled.orValue(false) == true &&
+        variables.backups != null && variables.backups >= 7
+      messageExpression: >-
+        'New production PostgresDatabase requires storageGB>=50, multiAZ=true, encryptionEnabled=true, backupRetentionDays>=7 (got storageGB=' +
+        (variables.storage != null ? string(variables.storage) : 'missing') +
+        ', multiAZ=' + string(variables.s.?multiAZ.orValue(false)) +
+        ', encrypted=' + string(variables.s.?encryptionEnabled.orValue(false)) +
+        ', backups=' + (variables.backups != null ? string(variables.backups) : 'missing') + ')'
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: postgres-update-allowed-attributes
+spec:
+  validationActions:
+    - Deny
+  evaluation:
+    mode: JSON
+  matchConditions:
+    - name: is-postgres-update
+      expression: "object.operation == 'update' && object.kind == 'PostgresDatabase'"
+  variables:
+    - name: changes
+      expression: "object.?diff.?changes.orValue([])"
+    - name: forbidden
+      expression: >-
+        variables.changes != null
+          ? variables.changes.filter(c,
+              !(c.path in ['/spec/storageGB', '/spec/instanceClass', '/spec/backupRetentionDays', '/spec/maintenanceWindow'] ||
+                c.path.startsWith('/metadata/labels/'))
+            ).map(c, c.path)
+          : []
+  validations:
+    - expression: "size(variables.forbidden) == 0"
+      messageExpression: "'PostgresDatabase update modified immutable attribute(s): ' + variables.forbidden.join(', ')"
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: postgres-no-disk-shrink
+spec:
+  validationActions:
+    - Deny
+  evaluation:
+    mode: JSON
+  matchConditions:
+    - name: is-postgres-update
+      expression: "object.operation == 'update' && object.kind == 'PostgresDatabase'"
+  variables:
+    - name: beforeGB
+      expression: "object.?before.?spec.?storageGB.orValue(null)"
+    - name: afterGB
+      expression: "object.?after.?spec.?storageGB.orValue(null)"
+  validations:
+    - expression: "variables.beforeGB != null && variables.afterGB != null && variables.afterGB >= variables.beforeGB"
+      messageExpression: >-
+        'PostgresDatabase storageGB cannot shrink or be removed: ' +
+        (variables.beforeGB != null ? string(variables.beforeGB) : 'missing') + ' -> ' +
+        (variables.afterGB != null ? string(variables.afterGB) : 'missing')
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: postgres-prod-backup-floor
+spec:
+  validationActions:
+    - Deny
+  evaluation:
+    mode: JSON
+  matchConditions:
+    - name: is-prod-postgres-update
+      expression: "object.operation == 'update' && object.kind == 'PostgresDatabase' && object.environment == 'prod'"
+  variables:
+    - name: days
+      expression: "object.?after.?spec.?backupRetentionDays.orValue(null)"
+  validations:
+    - expression: "variables.days != null && variables.days >= 7"
+      messageExpression: "'Production PostgresDatabase backupRetentionDays is ' + (variables.days != null ? string(variables.days) : 'missing') + '; must be >= 7'"
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: postgres-large-disk-jump
+spec:
+  validationActions:
+    - Warn
+  evaluation:
+    mode: JSON
+  matchConditions:
+    - name: is-postgres-update
+      expression: "object.operation == 'update' && object.kind == 'PostgresDatabase'"
+  variables:
+    - name: beforeGB
+      expression: "object.?before.?spec.?storageGB.orValue(null)"
+    - name: afterGB
+      expression: "object.?after.?spec.?storageGB.orValue(null)"
+  validations:
+    - expression: "variables.beforeGB == null || variables.afterGB == null || double(variables.afterGB) <= double(variables.beforeGB) * 2.0"
+      messageExpression: >-
+        'Large PostgresDatabase disk growth (>2x): ' +
+        string(variables.beforeGB) + ' -> ' + string(variables.afterGB) + ' GB — verify cost impact'

@@ -1,0 +1,16 @@
+apiVersion: policies.kyverno.io/v1
+kind: PolicyException
+metadata:
+  name: incident-postgres-attr-waiver
+spec:
+  evaluationMode: JSON
+  policyRefs:
+    - name: postgres-update-allowed-attributes
+      kind: ValidatingPolicy
+  expiresAt: "2099-01-01T00:00:00Z"
+  matchConditions:
+    - name: is-postgres-update
+      expression: "object.?kind.orValue('') == 'PostgresDatabase' && object.?operation.orValue('') == 'update'"
+  validations:
+    - message: "Emergency PostgresDatabase attribute waiver requires an incident ticket (INC-####)."
+      expression: "object.?changeTicket.orValue('').matches('^INC-[0-9]+$')"
