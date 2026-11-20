@@ -2,12 +2,11 @@ package main
 
 import (
 	"context"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
-
-	"github.com/kyverno/kyverno-json/pkg/policy"
 
 	"kyverno-show/part3-json-gitops/internal/jsondiff"
 )
@@ -42,7 +41,7 @@ func evalSample(t *testing.T, beforeFile, afterFile string) int {
 	if err != nil {
 		t.Fatalf("ToMap: %v", err)
 	}
-	policies, err := policy.Load("./policies")
+	policies, err := loadValidatingPolicies("./policies")
 	if err != nil {
 		t.Fatalf("load policies: %v", err)
 	}
@@ -156,7 +155,7 @@ func TestRemovedRequiredNumericFieldProducesCleanFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ToMap: %v", err)
 	}
-	policies, err := policy.Load("./policies")
+	policies, err := loadValidatingPolicies("./policies")
 	if err != nil {
 		t.Fatalf("load policies: %v", err)
 	}
@@ -176,6 +175,21 @@ func TestLoadFromGitAndDisk(t *testing.T) {
 	}
 
 	repo := t.TempDir()
+	// Git marks .git/objects/* read-only on Windows, which causes TempDir's RemoveAll to fail.
+	t.Cleanup(func() {
+		_ = filepath.WalkDir(repo, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			mode := os.FileMode(0o600)
+			if d.IsDir() {
+				mode = 0o700
+			}
+			_ = os.Chmod(path, mode)
+			return nil
+		})
+	})
+
 	runGit := func(args ...string) {
 		t.Helper()
 		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
@@ -224,7 +238,7 @@ func TestLoadFromGitAndDisk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ToMap: %v", err)
 	}
-	policies, err := policy.Load("./policies")
+	policies, err := loadValidatingPolicies("./policies")
 	if err != nil {
 		t.Fatalf("load policies: %v", err)
 	}

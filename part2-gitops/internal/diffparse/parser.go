@@ -172,7 +172,7 @@ func Parse(rawDiff string, meta Metadata) DiffReport {
 }
 
 // ToMap converts the DiffReport to generic JSON structures (map[string]any / []any)
-// expected by kyverno-json and JMESPath evaluators.
+// expected by CEL ValidatingPolicy (evaluation.mode: JSON) evaluators.
 func (r DiffReport) ToMap() (map[string]any, error) {
 	b, err := json.Marshal(r)
 	if err != nil {

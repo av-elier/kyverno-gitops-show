@@ -32,7 +32,7 @@ type DiffSummary struct {
 	TotalChanges int           `json:"totalChanges"`
 }
 
-// ChangeEvent is the structured payload evaluated by kyverno-json ValidatingPolicy rules.
+// ChangeEvent is the structured payload evaluated by CEL ValidatingPolicy rules (evaluation.mode: JSON).
 // Instead of running regexes on raw diff lines, policies inspect typed before/after state
 // and RFC 6902-style JSON Pointer paths.
 type ChangeEvent struct {

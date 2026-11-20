@@ -1,45 +1,52 @@
-apiVersion: kyverno.io/v1
-kind: ClusterPolicy
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
 metadata:
-  name: require-pod-security
+  name: disallow-latest-tag
   annotations:
-    policies.kyverno.io/title: Require Pod Security Baseline
+    policies.kyverno.io/title: Disallow Latest Image Tag
     policies.kyverno.io/category: Security
     policies.kyverno.io/description: >-
-      Forbids mutable :latest image tags and requires containers in Deployments
-      to run as non-root without privilege escalation.
+      Forbids mutable :latest or untagged container images in Deployments.
 spec:
-  validationFailureAction: Enforce
-  background: true
-  rules:
-    - name: disallow-latest-tag
-      match:
-        any:
-          - resources:
-              kinds:
-                - Deployment
-      validate:
-        message: "Container images must use an explicit, immutable tag (':latest' or untagged images are forbidden)."
-        pattern:
-          spec:
-            template:
-              spec:
-                containers:
-                  - image: "*:* & !*:latest"
-    - name: require-non-root
-      match:
-        any:
-          - resources:
-              kinds:
-                - Deployment
-      validate:
-        message: "Deployments must set pod securityContext.runAsNonRoot=true and disallow privilege escalation."
-        pattern:
-          spec:
-            template:
-              spec:
-                securityContext:
-                  runAsNonRoot: true
-                containers:
-                  - securityContext:
-                      allowPrivilegeEscalation: false
+  validationActions:
+    - Deny
+  evaluation:
+    background:
+      enabled: true
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["deployments"]
+  validations:
+    - message: "Container images must use an explicit, immutable tag (':latest' or untagged images are forbidden)."
+      expression: "object.spec.template.spec.containers.all(c, c.image.contains(':') && !c.image.endsWith(':latest'))"
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: require-non-root
+  annotations:
+    policies.kyverno.io/title: Require Non-Root and Disallow Privilege Escalation
+    policies.kyverno.io/category: Security
+    policies.kyverno.io/description: >-
+      Requires Deployments to set pod securityContext.runAsNonRoot=true and
+      disallow privilege escalation on every container.
+spec:
+  validationActions:
+    - Deny
+  evaluation:
+    background:
+      enabled: true
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["deployments"]
+  validations:
+    - message: "Deployments must set pod securityContext.runAsNonRoot=true and disallow privilege escalation."
+      expression: >-
+        object.spec.template.spec.?securityContext.?runAsNonRoot.orValue(false) == true &&
+        object.spec.template.spec.containers.all(c, c.?securityContext.?allowPrivilegeEscalation.orValue(true) == false)

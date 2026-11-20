@@ -3,40 +3,42 @@ package firstprinciples
 import (
 	"testing"
 
-	"github.com/kyverno/kyverno-json/pkg/apis/policy/v1alpha1"
+	policiesv1beta1 "github.com/kyverno/api/api/policies.kyverno.io/v1beta1"
 	"sigs.k8s.io/yaml"
 )
 
-func TestMiniEngineMatchExcludeAndAny(t *testing.T) {
+func TestMiniCELEngineMatchVariablesAndValidations(t *testing.T) {
 	policyYAML := `
-apiVersion: json.kyverno.io/v1alpha1
+apiVersion: policies.kyverno.io/v1
 kind: ValidatingPolicy
 metadata:
   name: unit-test-policy
 spec:
-  rules:
-    - name: check-env-or-ticket
-      match:
-        all:
-          - env: "prod"
-      exclude:
-        all:
-          - author: "release-bot"
-      assert:
-        any:
-          - message: "must have hotfix flag or CHG ticket"
-            check:
-              hotfix: true
-          - message: "must have hotfix flag or CHG ticket"
-            check:
-              (wildcard('CHG-*', ticket)): true
+  validationActions:
+    - Deny
+  evaluation:
+    mode: JSON
+  matchConditions:
+    - name: only-prod
+      expression: "object.env == 'prod'"
+    - name: exclude-release-bot
+      expression: "object.author != 'release-bot'"
+  variables:
+    - name: hasTicket
+      expression: "has(object.ticket) && object.ticket.matches('^CHG-[0-9]+$')"
+  validations:
+    - message: "must have hotfix flag or CHG ticket"
+      expression: "(has(object.hotfix) && object.hotfix == true) || variables.hasTicket"
 `
-	var pol v1alpha1.ValidatingPolicy
+	var pol policiesv1beta1.ValidatingPolicy
 	if err := yaml.Unmarshal([]byte(policyYAML), &pol); err != nil {
 		t.Fatalf("unmarshal policy: %v", err)
 	}
 
-	eng := NewEngine()
+	eng, err := NewEngine()
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
 
 	cases := []struct {
 		name       string
@@ -44,18 +46,18 @@ spec:
 		wantStatus RuleStatus
 	}{
 		{
-			name:       "non-prod skipped by match",
+			name:       "non-prod skipped by matchCondition",
 			payload:    map[string]any{"env": "staging", "author": "alice", "hotfix": false, "ticket": ""},
 			wantStatus: StatusSkip,
 		},
 		{
-			name:       "release-bot skipped by exclude",
+			name:       "release-bot skipped by matchCondition",
 			payload:    map[string]any{"env": "prod", "author": "release-bot", "hotfix": false, "ticket": ""},
 			wantStatus: StatusSkip,
 		},
 		{
-			name:       "prod with CHG ticket passes via assert.any",
-			payload:    map[string]any{"env": "prod", "author": "alice", "hotfix": false, "ticket": "CHG-101"},
+			name:       "prod with CHG ticket passes via variable",
+			payload:    map[string]any{"env": "prod", "author": "alice", "hotfix": false, "ticket": "CHG-101", "count": float64(5)},
 			wantStatus: StatusPass,
 		},
 		{
@@ -67,7 +69,7 @@ spec:
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			outcomes, err := eng.Evaluate([]*v1alpha1.ValidatingPolicy{&pol}, tc.payload)
+			outcomes, err := eng.Evaluate([]*policiesv1beta1.ValidatingPolicy{&pol}, tc.payload)
 			if err != nil {
 				t.Fatalf("evaluate error: %v", err)
 			}

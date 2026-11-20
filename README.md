@@ -1,29 +1,32 @@
-# Kyverno From First Principles: Kubernetes Admission Policies & Custom GitOps Diff Validation in Go
+# Kyverno From First Principles: CEL `ValidatingPolicy` for Kubernetes & Non-Kubernetes GitOps JSON in Go
 
-A hands-on engineering exploration of **Kyverno**—how its Go engine evaluates Kubernetes `ClusterPolicy` manifests, how a declarative `match` → `assert` engine works from first principles, and how `kyverno-json` enables zero-regex GitOps policy guardrails over structured JSON state transitions.
+A hands-on engineering exploration of **Kyverno `v1.20.0`**—how its modern **CEL (`ValidatingPolicy`, `policies.kyverno.io/v1`)** engine evaluates Kubernetes workloads (`evaluation.mode: Kubernetes`), how a declarative `matchConditions` → `validations` CEL engine works from first principles, and how `evaluation.mode: JSON` (which superseded the archived `kyverno-json` sub-project) enables zero-regex GitOps policy guardrails over structured JSON state transitions.
 
 ---
 
 ## Mental Model: What Is Kyverno Really?
 
-At its core, Kyverno is **not magic**—it is a **declarative tree-matching & expression-evaluation engine** wrapped in a Kubernetes admission controller.
+At its core, Kyverno is **not magic**—it is a **declarative scope-matching & CEL expression-evaluation engine** wrapped in a Kubernetes admission controller (and a standalone JSON evaluator).
 
-When you run `kubectl apply -f deployment.yaml`, the Kubernetes API server sends an `AdmissionReview` JSON payload (containing the object being created/updated) to Kyverno's webhook before persisting it to `etcd`. Inside Kyverno, every rule boils down to three steps:
+When you run `kubectl apply -f deployment.yaml`, the Kubernetes API server sends an `AdmissionReview` JSON payload (containing the object being created/updated) to Kyverno's webhook before persisting it to `etcd`. Inside Kyverno's modern `ValidatingPolicy` (`policies.kyverno.io/v1`) engine, every policy boils down to three steps:
 
-1. **Scope (`match` / `exclude`)**: *Does this rule care about this payload?* (e.g., "Only check `Deployment` objects", or "Only check diffs touching `environments/prod/`"). If not, skip.
-2. **Project & Evaluate (`pattern` / `assert` + JMESPath)**: *Walk the expected YAML tree side-by-side with the payload JSON tree.* Where keys are literal fields, descend into the object; where keys are expressions like `(regex_match(...))` or `~.files`, compute or iterate dynamically.
-3. **Decide (`Enforce` vs `Audit`)**: Return `Pass`, `Fail`, or `Skip`. In Kubernetes, `Enforce` rejects the API request; `Audit` lets it through and records a `PolicyReport` violation.
+1. **Scope (`matchConstraints` / `matchConditions`)**: *Does this policy care about this payload?* In Kubernetes mode, `matchConstraints` filters by API group/version/resource/operation, and `matchConditions` runs CEL pre-filters. In `evaluation.mode: JSON`, `matchConstraints` is bypassed and `matchConditions` filters arbitrary JSON objects (e.g., `object.operation == 'update' && object.kind == 'PostgresDatabase'`). If a condition returns `false`, the policy is skipped (`SKIP`).
+2. **Evaluate (`variables` + `validations` in CEL)**: *Compile and execute Common Expression Language (`object`, `variables`) against the payload.* Expressions can traverse nested objects safely with `has(...)` / optional chaining (`.?...`), iterate arrays with `.all(...)` / `.exists(...)`, and run RE2 `.matches(...)` checks.
+3. **Decide (`Deny`, `Audit`, or `Warn`)**: Return `Pass`, `Fail`, or `Skip`. In Kubernetes, `Deny` rejects the API request; `Audit` lets it through and records a report violation.
 
 ```mermaid
 flowchart LR
-    A["Input Payload<br/>(K8s YAML or Git Diff JSON)"] --> B{"1. Match / Exclude<br/>Does rule apply?"}
-    B -- "No" --> C["SKIP"]
-    B -- "Yes" --> D["2. Walk Assertion / Pattern Tree<br/>(+ JMESPath & Foreach ~)"]
-    D -- "All checks pass" --> E["PASS"]
-    D -- "Violation found" --> F{"3. Failure Action"}
-    F -- "Enforce" --> G["FAIL (Block / Exit 1)"]
-    F -- "Audit" --> H["FAIL (Warn / Report)"]
+    A["Input Payload<br/>(K8s Resource or GitOps JSON)"] --> B{"1. Scope<br/>matchConstraints + matchConditions (CEL)"}
+    B -- "False" --> C["SKIP"]
+    B -- "True" --> D["2. Variables + Validations<br/>(CEL Expressions over object)"]
+    D -- "All true" --> E["PASS"]
+    D -- "False" --> F{"3. validationActions"}
+    F -- "Deny" --> G["FAIL (Block / Exit 1)"]
+    F -- "Audit / Warn" --> H["FAIL (Warn / Report)"]
 ```
+
+> **Why `ValidatingPolicy` (`policies.kyverno.io/v1`) instead of `ClusterPolicy` and `kyverno-json`?**
+> Starting with Kyverno `v1.19`–`v1.20`, legacy JMESPath-based `ClusterPolicy`/`Policy` (`kyverno.io/v1`) entered deprecation in favor of CEL-first policy types (`ValidatingPolicy`, `MutatingPolicy`, etc. under `policies.kyverno.io/v1`). Meanwhile, `kyverno/kyverno-json` (`json.kyverno.io/v1alpha1`) was archived in September 2026 and removed from core Kyverno (`kyverno json scan` was dropped in favor of `ValidatingPolicy` with `spec.evaluation.mode: JSON` and `kyverno apply --json`).
 
 ---
 
@@ -32,85 +35,81 @@ flowchart LR
 ```text
 kyverno-show/
 ├── LICENSE                                    # MIT License
-├── README.md
-├── part1-k8s/                                 # Part 1: Classic Kubernetes ClusterPolicy in Go + k3s guide
-│   ├── go.mod / go.sum
-│   ├── main.go                                # Embeds github.com/kyverno/kyverno/pkg/engine
+├── README.md                                  # English guide
+├── README.ru.md                               # Russian guide
+├── part1-k8s/                                 # Part 1: Kubernetes ValidatingPolicy in Go + k3s guide
+│   ├── go.mod / go.sum                        # Kyverno v1.20.0 + github.com/kyverno/api
+│   ├── main.go                                # Embeds pkg/cel/policies/vpol/{compiler,engine}
 │   ├── main_test.go                           # Verifies bad vs good Deployment manifests
 │   ├── policies/
-│   │   ├── require-pod-security.yaml          # Enforce: no :latest tag, runAsNonRoot, no privilege escalation
+│   │   ├── require-pod-security.yaml          # Deny (2 policies): no :latest tag, runAsNonRoot, no privilege escalation
 │   │   └── require-standard-labels.yaml       # Audit: require metadata.labels.team and env
 │   └── manifests/
-│       ├── deployment-bad.yaml                # Triggers 2 Enforce failures + 1 Audit failure
-│       └── deployment-good.yaml               # Passes all 3 rules
-├── part2-gitops/                              # Part 2: First-principles GitOps diff validator in Go
-│   ├── go.mod / go.sum
-│   ├── main.go                                # CLI ('gitops-guard') supporting kyverno-json & mini engines
-│   ├── main_test.go                           # Parity tests across both engines
+│       ├── deployment-bad.yaml                # Triggers 2 Deny failures + 1 Audit failure
+│       └── deployment-good.yaml               # Passes all 3 policies
+├── part2-gitops/                              # Part 2: From-first-principles GitOps diff validator in Go
+│   ├── go.mod / go.sum                        # Kyverno v1.20.0 + google/cel-go
+│   ├── main.go                                # CLI ('gitops-guard') supporting -engine kyverno & -engine mini
+│   ├── main_test.go                           # Parity tests across both CEL engines
 │   ├── policies/
-│   │   └── gitops-diff-policy.yaml            # ValidatingPolicy (json.kyverno.io/v1alpha1) for git diffs
+│   │   └── gitops-diff-policy.yaml            # 4 ValidatingPolicy (evaluation.mode: JSON) docs for git diffs
 │   ├── internal/
 │   │   ├── diffparse/                         # Unified git diff -> structured DiffReport JSON adapter
-│   │   └── firstprinciples/                   # ~230-line from-first-principles engine over Kyverno models
+│   │   └── firstprinciples/                   # ~155-line from-first-principles CEL evaluator over google/cel-go
 │   └── samples/
 │       ├── *.diff                             # Raw unified git diff fixtures
-│       └── parsed/*.diff.json                 # Exact DiffReport JSON payloads evaluated by the engine
+│       └── parsed/*.diff.json                 # Exact DiffReport JSON payloads evaluated by the engines
 └── part3-json-gitops/                         # Part 3: Production-style JSON State-Transition GitOps PoC
-    ├── go.mod / go.sum
+    ├── go.mod / go.sum                        # Kyverno v1.20.0 + evaluation.mode: JSON
     ├── main.go                                # CLI comparing before/after JSON or git base vs working file
     ├── main_test.go                           # 13 tests covering Postgres, Kafka (+acls[]), AWS Secret & git
     ├── policies/
-    │   ├── postgres-policy.yaml               # Create rules + update allowlist + no disk shrink
+    │   ├── postgres-policy.yaml               # Create rules + update allowlist + no disk shrink + backup floor
     │   ├── kafka-policy.yaml                  # Update allowlist + no partition shrink + replication + acls[]
     │   └── aws-secret-policy.yaml             # No plaintext secretString + rotation bounds + immutable kmsKeyId
     ├── internal/jsondiff/                     # Recursive RFC 6902-style JSON diff -> ChangeEvent
     └── samples/
         ├── *.json                             # Before/after JSON resource states
-        └── events/*.event.json                # Pre-built ChangeEvent JSON payloads fed to kyverno-json
+        └── events/*.event.json                # Pre-built ChangeEvent JSON payloads (also usable with kyverno apply --json)
 ```
 
 ---
 
-## Part 1: Classic Kubernetes Policy Validation (`part1-k8s`)
+## Part 1: Kubernetes `ValidatingPolicy` (`part1-k8s`)
 
-In Part 1, we use **real Kubernetes `ClusterPolicy` (`kyverno.io/v1`) manifests** and run them directly through Kyverno's own Go engine (`github.com/kyverno/kyverno/pkg/engine`)—no cluster required—while keeping the exact YAML files ready to apply to **k3s on WSL**.
+In Part 1, we use **real Kubernetes `ValidatingPolicy` (`policies.kyverno.io/v1`) manifests** and run them directly through Kyverno `v1.20.0`'s CEL `vpol` engine (`pkg/cel/policies/vpol`)—no cluster required—while keeping the exact YAML files ready to apply to **k3s on WSL** or check with `kyverno apply`.
 
 ### 1.1 Anatomy of the Policies
 
-1. [require-pod-security.yaml](./part1-k8s/policies/require-pod-security.yaml) (`validationFailureAction: Enforce`):
-   - **`disallow-latest-tag`**: Matches `Deployment` resources and asserts every container image matches the Kyverno wildcard pattern `"*:* & !*:latest"` (must contain a `:` tag, and must **not** end in `:latest`).
-   - **`require-non-root`**: Asserts `spec.template.spec.securityContext.runAsNonRoot: true` and `allowPrivilegeEscalation: false` on every container.
-2. [require-standard-labels.yaml](./part1-k8s/policies/require-standard-labels.yaml) (`validationFailureAction: Audit`):
-   - **`check-team-and-env-labels`**: Asserts `metadata.labels.team` and `metadata.labels.env` match `"?*"` (at least 1 character, non-empty).
+1. [require-pod-security.yaml](./part1-k8s/policies/require-pod-security.yaml) (`validationActions: [Deny]`, multi-document YAML with 2 policies):
+   - **`disallow-latest-tag`**: Matches `apps/v1` `deployments` via `matchConstraints` and checks `object.spec.template.spec.containers.all(c, c.image.contains(':') && !c.image.endsWith(':latest'))`.
+   - **`require-non-root`**: Uses CEL optional field access (`.?`) to verify `runAsNonRoot == true` on the pod template and `allowPrivilegeEscalation == false` on every container.
+2. [require-standard-labels.yaml](./part1-k8s/policies/require-standard-labels.yaml) (`validationActions: [Audit]`):
+   - **`require-standard-labels`**: Checks that `metadata.labels.team` and `metadata.labels.env` are both non-empty strings.
 
-> **Note on `Pod` vs `Deployment` and Kyverno Autogen:**
-> In a live cluster, if you write a rule matching `Pod`, Kyverno's background/autogen controller automatically generates sibling rules for `Deployment`, `StatefulSet`, `DaemonSet`, etc. Here, our policies match `Deployment` directly and inspect `spec.template.spec` so that the exact same YAML behaves identically in both standalone Go engine tests and live `k3s`.
+> **Why multi-document YAML instead of one policy with two `validations`?**
+> In `ValidatingPolicy`, evaluation short-circuits on the first failing expression in `spec.validations[]` and returns a single rule outcome per policy. Splitting `disallow-latest-tag` and `require-non-root` into separate `ValidatingPolicy` resources ensures both violations are reported independently when `deployment-bad.yaml` fails both checks.
 
 ### 1.2 What Happens Inside the Go Code
 
 In [part1-k8s/main.go](./part1-k8s/main.go):
 
-1. **Load policies & manifests**: YAML files are unmarshaled via `sigs.k8s.io/yaml` into `kyvernov1.ClusterPolicy` structs and `unstructured.Unstructured` Kubernetes objects (just like the API server stores arbitrary CRDs/resources).
-2. **Initialize Kyverno's engine**:
+1. **Load policies & manifests**: Multi-document YAML files are unmarshaled via `sigs.k8s.io/yaml` into `policiesv1beta1.ValidatingPolicy` structs (`v1` and `v1beta1` share `ValidatingPolicySpec`) and `unstructured.Unstructured` Kubernetes objects.
+2. **Compile & initialize Kyverno's CEL `vpol` engine**:
    ```go
-   cfg := config.NewDefaultConfiguration(false)
-   jp := jmespath.New(cfg)
-   eng := engine.NewEngine(cfg, config.NewDefaultMetricsConfiguration(), jp, ...)
+   provider, err := vpolengine.NewProvider(vpolcompiler.NewCompiler(), policies, nil)
+   eng := vpolengine.NewEngine(provider, noopNsResolver, matching.NewMatcher())
    ```
-3. **Simulate an Admission Request via `PolicyContext`**:
+3. **Simulate an Admission Request via `celengine.Request`**:
    ```go
-   pCtx, err := engine.NewPolicyContext(jp, res, kyvernov1.Create, nil, cfg)
-   pCtx = pCtx.WithPolicy(pol)
-   resp := eng.Validate(ctx, pCtx)
+   req := celengine.Request(nil, gvk, gvr, "", res.GetName(), res.GetNamespace(),
+       admissionv1.Create, authenticationv1.UserInfo{}, &res, nil, false, nil)
+   resp, err := eng.Handle(ctx, req, nil)
    ```
-   `NewPolicyContext` populates Kyverno's internal JSON context (`request.object`, `request.operation = CREATE`, `request.namespace`, container image metadata, etc.).
-4. **Enforce vs Audit handling**: Our CLI iterates `resp.PolicyResponse.Rules`, prints each rule's status (`PASS`/`FAIL`/`SKIP`), and only increments `enforcedFailures` (causing exit code `1`) when `pol.Spec.ValidationFailureAction.Enforce()` is true.
+4. **Deny vs Audit handling**: Our CLI iterates `resp.Policies` and each policy's `Rules`, prints `[PASS]`/`[FAIL]`/`[SKIP]`, and only increments `enforcedFailures` (causing exit code `1`) when `polResp.Actions.Has(admissionregistrationv1.Deny)`.
 
-> **Go Module Caveat (`replace` directive)**:
-> Kyverno `v1.13.6` patches `k8s.io/pod-security-admission` via a `replace` directive in its own `go.mod`, which Go ignores for downstream consumers. That's why [part1-k8s/go.mod](./part1-k8s/go.mod) includes:
-> ```go
-> replace k8s.io/pod-security-admission v0.31.0 => github.com/kyverno/pod-security-admission v0.0.0-20240715131510-7fb54a8d376d
-> ```
+> **Go Module Caveat (`replace` directives)**:
+> `github.com/kyverno/kyverno v1.20.0` uses two `replace` directives in its own `go.mod` (for `github.com/kyverno/api` and `k8s.io/pod-security-admission`), which Go ignores for downstream consumers. That is why the `go.mod` files in this repo include the matching `replace` block.
 
 ### 1.3 Running Part 1 Locally (Go)
 
@@ -130,19 +129,25 @@ go run . -policy ./policies -manifest ./manifests/deployment-good.yaml
 Observed output on [deployment-bad.yaml](./part1-k8s/manifests/deployment-bad.yaml):
 
 ```text
-[FAIL] policy=require-pod-security action=Enforce resource=Deployment/production/payments-api rule=disallow-latest-tag
-       message: validation error: Container images must use an explicit, immutable tag (':latest' or untagged images are forbidden). rule disallow-latest-tag failed at path /spec/template/spec/containers/0/image/
-[FAIL] policy=require-pod-security action=Enforce resource=Deployment/production/payments-api rule=require-non-root
-       message: validation error: Deployments must set pod securityContext.runAsNonRoot=true and disallow privilege escalation. rule require-non-root failed at path /spec/template/spec/containers/0/securityContext/allowPrivilegeEscalation/
-[FAIL] policy=require-standard-labels action=Audit resource=Deployment/production/payments-api rule=check-team-and-env-labels
-       message: validation error: Deployments should define metadata.labels.team and metadata.labels.env for ownership tracking. rule check-team-and-env-labels failed at path /metadata/labels/env/
+[FAIL] policy=disallow-latest-tag action=Deny resource=Deployment/production/payments-api rule=validation
+       message: Container images must use an explicit, immutable tag (':latest' or untagged images are forbidden).
+[FAIL] policy=require-non-root action=Deny resource=Deployment/production/payments-api rule=validation
+       message: Deployments must set pod securityContext.runAsNonRoot=true and disallow privilege escalation.
+[FAIL] policy=require-standard-labels action=Audit resource=Deployment/production/payments-api rule=validation
+       message: Deployments should define metadata.labels.team and metadata.labels.env for ownership tracking.
 
-Summary: 3 rule evaluations, 2 enforced failures
+Summary: 3 policy evaluations, 2 enforced failures
 ```
 
-### 1.4 Trying the Exact Same Policies on Real `k3s` in WSL
+### 1.4 Trying the Exact Same Policies with `kyverno` CLI or `k3s` in WSL
 
-If you want to watch the Kubernetes API server reject `deployment-bad.yaml` in a real cluster via WSL:
+With the Kyverno CLI (`v1.20+`):
+
+```bash
+kyverno apply ./policies --resource ./manifests/deployment-bad.yaml
+```
+
+Or in a live `k3s` cluster via WSL:
 
 ```bash
 # 1. Inside WSL (Ubuntu/Debian), install k3s (single-binary Kubernetes)
@@ -154,7 +159,7 @@ helm repo add kyverno https://kyverno.github.io/kyverno/
 helm repo update
 helm install kyverno kyverno/kyverno -n kyverno --create-namespace --wait
 
-# 3. Apply the policies from this repo
+# 3. Apply the ValidatingPolicies from this repo
 cd part1-k8s
 kubectl apply -f policies/
 
@@ -170,15 +175,15 @@ kubectl apply -f manifests/deployment-good.yaml  # Allowed (and passes Audit too
 
 Kubernetes is just YAML/JSON objects flowing through a webhook. What if you want **Kyverno-style declarative policies** for something that is **not Kubernetes**—for example, validating a **raw `git diff` in a GitOps CI pipeline**?
 
-That is literally why Kyverno created **`kyverno-json`** (`github.com/kyverno/kyverno-json`), which extracts Kyverno's `ValidatingPolicy` (`json.kyverno.io/v1alpha1`) and assertion-tree evaluator so it can validate *any* JSON/YAML structure (Terraform plans, API payloads, CI metadata, or parsed diffs).
+In modern Kyverno, you no longer need the archived `kyverno-json` tool—`ValidatingPolicy` (`policies.kyverno.io/v1`) natively supports **`spec.evaluation.mode: JSON`**, allowing the exact same CEL engine to evaluate *any* JSON payload (Terraform plans, API payloads, CI metadata, or parsed diffs).
 
-To understand it **from first principles**, Part 2 implements a 4-stage pipeline in Go (`gitops-guard`) with **two engines running the exact same Kyverno `v1alpha1.ValidatingPolicy` configuration**:
-1. **`-engine kyverno-json`** (default): Calls Kyverno's official public library (`github.com/kyverno/kyverno-json/pkg/policy` + `pkg/json-engine`).
-2. **`-engine mini`**: A transparent ~230-line from-first-principles evaluator ([internal/firstprinciples/engine.go](./part2-gitops/internal/firstprinciples/engine.go)) built directly over Kyverno's `v1alpha1.ValidatingPolicy` Go structs so you can trace every `[MATCH]`, `[FOREACH]`, `[JMESPATH]`, and `[PASS]/[FAIL]` step yourself.
+To understand it **from first principles**, Part 2 implements a 4-stage pipeline in Go (`gitops-guard`) with **two engines running the exact same `policies.kyverno.io/v1` `ValidatingPolicy` YAML**:
+1. **`-engine kyverno`** (default): Calls Kyverno `v1.20.0`'s official CEL `vpol` engine in JSON mode (`celengine.RequestFromJSON(...)` with `nil` Kubernetes matcher).
+2. **`-engine mini`**: A transparent ~155-line from-first-principles CEL evaluator ([internal/firstprinciples/engine.go](./part2-gitops/internal/firstprinciples/engine.go)) built directly over `github.com/google/cel-go` so you can trace every `[MATCH]`, `[VAR]`, `[CEL]`, and `[PASS]`/`[FAIL]` step yourself.
 
 ### 2.1 Stage 1: Turning a Raw `git diff` Into a Policy-Queryable Model
 
-A declarative tree-matching engine cannot query raw unified diff text directly. So [internal/diffparse/parser.go](./part2-gitops/internal/diffparse/parser.go) parses a `git diff` plus CI/PR metadata (`author`, `branch`, `commitMessage`, `changeTicket`) into a structured `DiffReport` JSON object (saved examples live in [samples/parsed/](./part2-gitops/samples/parsed)):
+A declarative CEL engine cannot query raw unified diff text directly. So [internal/diffparse/parser.go](./part2-gitops/internal/diffparse/parser.go) parses a `git diff` plus CI/PR metadata (`author`, `branch`, `commitMessage`, `changeTicket`) into a structured `DiffReport` JSON object (saved examples live in [samples/parsed/](./part2-gitops/samples/parsed)):
 
 ```json
 {
@@ -214,64 +219,66 @@ A declarative tree-matching engine cannot query raw unified diff text directly. 
 
 You can inspect or save this exact generated JSON at any time with `-dump-payload` or `-emit-json`.
 
-### 2.2 Stage 2: Declarative `ValidatingPolicy` (`json.kyverno.io/v1alpha1`)
+### 2.2 Stage 2: Declarative `ValidatingPolicy` (`evaluation.mode: JSON`)
 
 Look at [part2-gitops/policies/gitops-diff-policy.yaml](./part2-gitops/policies/gitops-diff-policy.yaml):
 
 ```yaml
-apiVersion: json.kyverno.io/v1alpha1
+apiVersion: policies.kyverno.io/v1
 kind: ValidatingPolicy
 metadata:
-  name: gitops-diff-guardrails
+  name: require-ticket-for-prod
 spec:
-  rules:
-    - name: require-ticket-for-prod
-      identifier: "metadata.branch"
-      match:
-        all:
-          - summary:
-              hasProdChanges: true
-      assert:
-        all:
-          - message: "Production GitOps changes require a valid changeTicket (CHG-#### or JIRA-####)."
-            check:
-              metadata:
-                (regex_match('^(CHG|JIRA)-[0-9]+$', changeTicket)): true
-
-    - name: forbid-zero-replicas-in-prod
-      identifier: "summary.environments[0]"
-      match:
-        all:
-          - summary:
-              hasProdChanges: true
-      assert:
-        all:
-          - message: "Scaling replicas to 0 in production manifests is forbidden."
-            check:
-              ~.files:
-                (environment == 'prod' && regex_match('(?m)^[[:space:]]*replicas:[[:space:]]*0([[:space:]]|$)', addedText)): false
+  validationActions:
+    - Deny
+  evaluation:
+    mode: JSON
+  matchConditions:
+    - name: has-prod-changes
+      expression: "has(object.summary) && object.summary.hasProdChanges == true"
+  validations:
+    - message: "Production GitOps changes require a valid changeTicket (CHG-#### or JIRA-####)."
+      expression: >-
+        has(object.metadata) &&
+        has(object.metadata.changeTicket) &&
+        object.metadata.changeTicket.matches('^(CHG|JIRA)-[0-9]+$')
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: forbid-zero-replicas-in-prod
+spec:
+  validationActions:
+    - Deny
+  evaluation:
+    mode: JSON
+  matchConditions:
+    - name: has-prod-changes
+      expression: "has(object.summary) && object.summary.hasProdChanges == true"
+  validations:
+    - message: "Scaling replicas to 0 in production manifests is forbidden."
+      expression: >-
+        has(object.files) &&
+        object.files.all(f, !(f.environment == 'prod' && f.addedText.matches('(?m)^[[:space:]]*replicas:[[:space:]]*0([[:space:]]|$)')))
 ```
 
-Notice the three core primitives of Kyverno's assertion-tree language:
-- **Literal key descent** (`summary:` → `hasProdChanges: true`): Walks into nested maps and checks equality.
-- **Foreach prefix (`~.files`, `~.addedLines`)**: Iterates over every element of an array and evaluates the child subtree against each item (reporting the exact failing index like `files[0].addedLines[3]`).
-- **Parenthesized JMESPath key (`(expr): expected`)**: Computes an expression against the current node (`@` refers to the current value, e.g. a single string line inside `~.addedLines`) and asserts the result equals `expected`!
+Notice the core CEL primitives replacing old JMESPath/tree-matching syntax:
+- **Safe field presence (`has(object.summary)`)**: Guards against missing/omitted JSON fields before accessing nested keys.
+- **Universal quantification (`object.files.all(f, ...)`)**: Replaces `~.files` foreach iteration with a typed CEL comprehension.
+- **RE2 regex matching (`.matches(...)`)**: Standard CEL regex evaluation directly on strings.
 
-### 2.3 Stage 3: Official `kyverno-json` vs From-First-Principles `mini` Engine
+### 2.3 Stage 3: Official Kyverno CEL vs From-First-Principles `mini` Engine
 
-| Aspect | Kubernetes `ClusterPolicy` (Part 1) | `kyverno-json` (`-engine kyverno-json`) | From-First-Principles (`-engine mini`) |
+| Aspect | Kubernetes `ValidatingPolicy` (Part 1) | Kyverno JSON Mode (`-engine kyverno`) | From-First-Principles (`-engine mini`) |
 | :--- | :--- | :--- | :--- |
-| **Policy CRD / Model** | `kyvernov1.ClusterPolicy` (`kyverno.io/v1`) | `v1alpha1.ValidatingPolicy` (`json.kyverno.io/v1alpha1`) | Same `v1alpha1.ValidatingPolicy` Go struct |
-| **Input Payload** | `unstructured.Unstructured` K8s resource + admission info | Any `map[string]any` / JSON / YAML | Any `map[string]any` / JSON / YAML |
-| **Core Algorithm** | `Match` → `Validate` (`pattern` / `deny` / `cel`) | `Match` / `Exclude` → `Assert` tree + JMESPath | `evalMatch` → `assertTree` (`~.` foreach + `(expr)` JMESPath) |
-| **Best For** | Live K8s admission & background scans | Production CI/CD & arbitrary config validation | Understanding every line of how Kyverno evaluates trees |
+| **Policy Model** | `ValidatingPolicy` (`policies.kyverno.io/v1`) | `ValidatingPolicy` (`evaluation.mode: JSON`) | Same `ValidatingPolicy` Go struct |
+| **Input Payload** | `unstructured.Unstructured` K8s admission request | Any `map[string]any` / JSON (`RequestFromJSON`) | Any `map[string]any` / JSON (`object`) |
+| **Core Algorithm** | `matchConstraints` → `matchConditions` → `validations` | `matchConditions` → `variables` → `validations` (CEL) | `cel-go` `Env` → `matchConditions` → `validations` |
+| **Best For** | Live K8s admission & background scans | Production CI/CD & arbitrary JSON validation | Understanding how a CEL policy engine works inside |
 
-Inside [part2-gitops/internal/firstprinciples/engine.go](./part2-gitops/internal/firstprinciples/engine.go), `assertMap` handles every key in an assertion map with just three branches:
-1. `strings.HasPrefix(key, "~.")` → loop over the slice at that field (`foreach`).
-2. `strings.HasPrefix(key, "(") && strings.HasSuffix(key, ")")` → compile & execute JMESPath against the current node via `github.com/jmespath-community/go-jmespath`, then compare with `subExpected`.
-3. Anything else → look up `actualMap[key]` and recurse.
+Inside [part2-gitops/internal/firstprinciples/engine.go](./part2-gitops/internal/firstprinciples/engine.go), `NewEngine()` builds a `cel.Env` with `cel.Variable("object", cel.DynType)`, `cel.CrossTypeNumericComparisons(true)` (crucial because Go `encoding/json` decodes JSON numbers as `float64` while CEL literals like `0` are `int64`), `cel.OptionalTypes()`, and standard `cel-go` extensions (`Strings`, `Lists`, `Sets`, `Regex`).
 
-### 2.4 Running Part 2 Locally (Go)
+### 2.4 Running Part 2 Locally (Go & CLI)
 
 From `part2-gitops/`:
 
@@ -279,8 +286,8 @@ From `part2-gitops/`:
 # Run all unit & cross-engine parity tests
 go test -v ./...
 
-# 1. Run official kyverno-json engine on a dangerous prod diff (exits 1, 4 failures)
-go run . -diff ./samples/bad-prod-change.diff -engine kyverno-json
+# 1. Run official Kyverno CEL engine on a dangerous prod diff (exits 1, 4 failures)
+go run . -diff ./samples/bad-prod-change.diff -engine kyverno
 
 # 2. Run the from-first-principles mini engine with step-by-step trace
 go run . -diff ./samples/bad-prod-change.diff -engine mini -trace
@@ -288,24 +295,25 @@ go run . -diff ./samples/bad-prod-change.diff -engine mini -trace
 # 3. Inspect the JSON payload parsed from the raw diff
 go run . -diff ./samples/good-prod-change.diff -message "release (CHG-4821)" -dump-payload
 
-# 4. Staging-only diff: sets replicas: 0 in staging without a ticket -> PASSES (prod rules skipped)
-go run . -diff ./samples/staging-only.diff -engine kyverno-json
+# 4. Staging-only diff: sets replicas: 0 in staging without a ticket -> PASSES (prod policies skipped)
+go run . -diff ./samples/staging-only.diff -engine kyverno
+
+# 5. (Optional) Validate parsed JSON directly with the official kyverno CLI
+kyverno apply ./policies/gitops-diff-policy.yaml --json ./samples/parsed/bad-prod-change.diff.json
 ```
 
 Observed output from `-engine mini -trace` on [bad-prod-change.diff](./part2-gitops/samples/bad-prod-change.diff) (excerpt):
 
 ```text
-[FAIL] policy=gitops-diff-guardrails rule=forbid-hardcoded-secrets
-       -> Added diff lines must not contain hardcoded secrets, tokens, or passwords. (assert.all[0].files[0].addedLines[3]... expected false, got true)
-       trace: [JMESPATH] match.all[0] (summary.totalAdded > `0`) -> true
-       trace: [MATCH] rule matched payload
-       trace: [FOREACH] assert.all[0].files (2 items)
-       trace: [FOREACH] assert.all[0].files[0].addedLines (4 items)
-       trace: [JMESPATH] assert.all[0].files[0].addedLines[0] (...) -> false
-       trace: [PASS] ... == false
-       ...
-       trace: [JMESPATH] assert.all[0].files[0].addedLines[3] (...) -> true
-       trace: [FAIL] assert.all[0].files[0].addedLines[3]...: expected false, got true
+[FAIL] policy=forbid-hardcoded-secrets rule=validation
+       -> Added diff lines must not contain hardcoded secrets, tokens, or passwords.
+       trace: [MATCH] has-added-lines (has(object.summary) && object.summary.totalAdded > 0) -> true
+       trace: [CEL] validation[0] (has(object.files) && object.files.all(f, f.addedLines.all(line,
+  !line.matches('(?i)(ghp_[A-Za-z0-9]{8,}|AKIA[0-9A-Z]{8,}|(password|secret|api_key|token)[[:space:]]*[:=][[:space:]]*["\x27]?[A-Za-z0-9_\\-]{6,})')
+))) -> false
+       trace: [FAIL] Added diff lines must not contain hardcoded secrets, tokens, or passwords.
+
+Engine=mini | Files=2 | ProdChanges=true | Failures=4
 ```
 
 ---
@@ -344,40 +352,53 @@ Instead of regexes, [internal/jsondiff/diff.go](./part3-json-gitops/internal/jso
 }
 ```
 
-### 3.2 Zero-Regex Policies in `kyverno-json`
+### 3.2 Zero-Regex Policies in CEL (`evaluation.mode: JSON`)
 
-Look how expressive [postgres-policy.yaml](./part3-json-gitops/policies/postgres-policy.yaml), [kafka-policy.yaml](./part3-json-gitops/policies/kafka-policy.yaml), and [aws-secret-policy.yaml](./part3-json-gitops/policies/aws-secret-policy.yaml) become:
+Look how expressive [postgres-policy.yaml](./part3-json-gitops/policies/postgres-policy.yaml), [kafka-policy.yaml](./part3-json-gitops/policies/kafka-policy.yaml), and [aws-secret-policy.yaml](./part3-json-gitops/policies/aws-secret-policy.yaml) are in modern CEL:
 
 1. **Lifecycle-aware matching (`create` vs `update`)**:
    ```yaml
-   match:
-     all:
-       - operation: "update"
-         kind: "PostgresDatabase"
+   matchConditions:
+     - name: is-postgres-update
+       expression: "object.operation == 'update' && object.kind == 'PostgresDatabase'"
    ```
-2. **Allowlist of mutable attributes via JSON Pointer paths** (note `diff:` then `~.changes:` because `~.` operates on one field key at a time):
+2. **Allowlist of mutable attributes via JSON Pointer paths**:
    ```yaml
-   assert:
-     all:
-       - message: "PostgresDatabase update may only modify storageGB, instanceClass, backupRetentionDays, maintenanceWindow, or metadata.labels/*."
-         check:
-           diff:
-             ~.changes:
-               (contains(['/spec/storageGB', '/spec/instanceClass', '/spec/backupRetentionDays', '/spec/maintenanceWindow'], path) || starts_with(path, '/metadata/labels/')): true
+   validations:
+     - message: "PostgresDatabase update may only modify storageGB, instanceClass, backupRetentionDays, maintenanceWindow, or metadata.labels/*."
+       expression: >-
+         !has(object.diff) ||
+         !has(object.diff.changes) ||
+         object.diff.changes == null ||
+         object.diff.changes.all(c,
+           c.path in ['/spec/storageGB', '/spec/instanceClass', '/spec/backupRetentionDays', '/spec/maintenanceWindow'] ||
+           c.path.startsWith('/metadata/labels/')
+         )
    ```
 3. **Null-safe numerical invariants & array-of-objects checks**:
-   ```yaml
-   # Compare after >= before safely even if a field was deleted
-   (after.spec.storageGB != `null` && before.spec.storageGB != `null` && after.spec.storageGB >= before.spec.storageGB): true
+   ```cel
+   // Compare after >= before safely even if a field was deleted
+   has(object.after) &&
+   has(object.after.spec) &&
+   has(object.after.spec.storageGB) &&
+   object.after.spec.storageGB != null &&
+   has(object.before) &&
+   has(object.before.spec) &&
+   has(object.before.spec.storageGB) &&
+   object.before.spec.storageGB != null &&
+   object.after.spec.storageGB >= object.before.spec.storageGB
 
-   # Validate every object inside KafkaTopic spec.acls[]
-   after:
-     spec:
-       ~.acls:
-         (principal != `null` && principal != 'User:*' && contains(['READ', 'WRITE', 'DESCRIBE'], operation)): true
+   // Validate every object inside KafkaTopic spec.acls[]
+   object.after.spec.acls.all(a,
+     has(a.principal) &&
+     a.principal != null &&
+     a.principal != 'User:*' &&
+     has(a.operation) &&
+     a.operation in ['READ', 'WRITE', 'DESCRIBE']
+   )
    ```
 
-### 3.3 Running Part 3 Locally (Go)
+### 3.3 Running Part 3 Locally (Go & CLI)
 
 From `part3-json-gitops/`:
 
@@ -396,6 +417,9 @@ go run . -event ./samples/events/kafka-update-bad.event.json -output json
 
 # Example 4: Compare a file directly against a base git ref in a real repo
 go run . -git-base origin/main -file infra/prod/orders-db.json
+
+# Example 5: (Optional) Validate the same ChangeEvent JSON via the official kyverno CLI
+kyverno apply ./policies --json ./samples/events/postgres-update-bad.event.json
 ```
 
 Observed output on the illegal Postgres update:
@@ -405,15 +429,12 @@ Operation=update | Kind=PostgresDatabase | Env=prod | Changes=3
   [replace] /spec/backupRetentionDays: 14 -> 3
   [replace] /spec/region: eu-central-1 -> us-east-1
   [replace] /spec/storageGB: 200 -> 100
-[FAIL] policy=postgres-gitops-guardrails rule=postgres-update-allowed-attributes id=orders-db
-       -> PostgresDatabase update may only modify storageGB, instanceClass, backupRetentionDays, maintenanceWindow, or metadata.labels/*.
-        -> all[0].check.diff.~.changes[1].(contains(['/spec/storageGB', '/spec/instanceClass', '/spec/backupRetentionDays', '/spec/maintenanceWindow'], path) || starts_with(path, '/metadata/labels/')): Invalid value: false: Expected value: true
-[FAIL] policy=postgres-gitops-guardrails rule=postgres-no-disk-shrink id=orders-db
-       -> PostgresDatabase storageGB cannot be decreased or removed after creation (after >= before).
-        -> all[0].check.(after.spec.storageGB != `null` && before.spec.storageGB != `null` && after.spec.storageGB >= before.spec.storageGB): Invalid value: false: Expected value: true
-[FAIL] policy=postgres-gitops-guardrails rule=postgres-prod-backup-floor id=orders-db
-       -> Production PostgresDatabase backupRetentionDays must remain >= 7.
-        -> all[0].check.(after.spec.backupRetentionDays != `null` && after.spec.backupRetentionDays >= `7`): Invalid value: false: Expected value: true
+[FAIL] policy=postgres-update-allowed-attributes rule=validation id=orders-db
+       PostgresDatabase update may only modify storageGB, instanceClass, backupRetentionDays, maintenanceWindow, or metadata.labels/*.
+[FAIL] policy=postgres-no-disk-shrink rule=validation id=orders-db
+       PostgresDatabase storageGB cannot be decreased or removed after creation (after >= before).
+[FAIL] policy=postgres-prod-backup-floor rule=validation id=orders-db
+       Production PostgresDatabase backupRetentionDays must remain >= 7.
 
 Summary: Failures=3
 ```
@@ -422,6 +443,6 @@ Summary: Failures=3
 
 ## Key Takeaways
 
-1. **Kyverno policies are data, not scripts**: By separating *what to check* (declarative `ClusterPolicy` / `ValidatingPolicy` YAML) from *how to evaluate* (tree matcher + JMESPath), policy authors don't write imperative `if/else` Go code for every new rule.
-2. **Adapters unlock any domain**: Kyverno doesn't inherently understand `git diff` text—yet writing a small adapter ([diffparse](./part2-gitops/internal/diffparse/parser.go) or [jsondiff](./part3-json-gitops/internal/jsondiff/diff.go)) lets `kyverno-json` enforce release and security guardrails on diffs, state transitions, Terraform plans, or custom pipeline events.
-3. **First-principles simplicity**: Stripped of Kubernetes webhook plumbing, caches, and metrics, a Kyverno-style assertion engine is just a recursive tree walker paired with a `foreach` operator (`~.`) and an expression evaluator (`JMESPath`).
+1. **Kyverno policies are data, not scripts**: By separating *what to check* (declarative `ValidatingPolicy` YAML) from *how to evaluate* (Kyverno's CEL engine), policy authors don't write imperative `if/else` Go code for every new rule.
+2. **One unified policy model (`policies.kyverno.io/v1`) across K8s and JSON**: With `evaluation.mode: JSON`, the same `ValidatingPolicy` engine and `kyverno apply --json` workflow enforce guardrails on diffs, state transitions, Terraform plans, or custom CI events without relying on the archived `kyverno-json` tool.
+3. **First-principles simplicity**: Stripped of Kubernetes webhook plumbing, caches, and metrics, a CEL policy engine is just an activation map (`object`, `variables`), boolean scope filters (`matchConditions`), and compiled CEL validation expressions.

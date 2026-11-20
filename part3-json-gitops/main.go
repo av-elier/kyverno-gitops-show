@@ -7,14 +7,19 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
-	"github.com/kyverno/kyverno-json/pkg/apis/policy/v1alpha1"
-	jsonengine "github.com/kyverno/kyverno-json/pkg/json-engine"
-	"github.com/kyverno/kyverno-json/pkg/policy"
+	policiesv1beta1 "github.com/kyverno/api/api/policies.kyverno.io/v1beta1"
+	celengine "github.com/kyverno/kyverno/pkg/cel/engine"
+	vpolcompiler "github.com/kyverno/kyverno/pkg/cel/policies/vpol/compiler"
+	vpolengine "github.com/kyverno/kyverno/pkg/cel/policies/vpol/engine"
+	engineapi "github.com/kyverno/kyverno/pkg/engine/api"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"sigs.k8s.io/yaml"
 
 	"kyverno-show/part3-json-gitops/internal/jsondiff"
 )
@@ -73,7 +78,7 @@ func main() {
 		}
 	}
 
-	policies, err := policy.Load(*policyPath)
+	policies, err := loadValidatingPolicies(*policyPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error loading policies: %v\n", err)
 		os.Exit(2)
@@ -213,16 +218,23 @@ func loadFromGitAndDisk(repoDir, gitBase, filePath string) ([]byte, []byte, erro
 
 func evaluateEvent(
 	ctx context.Context,
-	policies []*v1alpha1.ValidatingPolicy,
+	policies []policiesv1beta1.ValidatingPolicyLike,
 	ev jsondiff.ChangeEvent,
 	payload map[string]any,
 ) (evalReport, error) {
-	eng := jsonengine.New()
-	resp := eng.Run(ctx, jsonengine.Request{
-		Resource: payload,
-		Policies: policies,
-	})
+	provider, err := vpolengine.NewProvider(vpolcompiler.NewCompiler(), policies, nil)
+	if err != nil {
+		return evalReport{}, fmt.Errorf("compile validating policies: %w", err)
+	}
 
+	// Pass nil matcher for JSON evaluation mode (matchConstraints do not apply to non-K8s payloads).
+	eng := vpolengine.NewEngine(provider, nil, nil)
+	resp, err := eng.Handle(ctx, celengine.RequestFromJSON(nil, &unstructured.Unstructured{Object: payload}), nil)
+	if err != nil {
+		return evalReport{}, err
+	}
+
+	identifier := extractResourceIdentifier(ev)
 	report := evalReport{
 		Operation: ev.Operation,
 		Kind:      ev.Kind,
@@ -233,27 +245,102 @@ func evaluateEvent(
 
 	for _, polResp := range resp.Policies {
 		for _, ruleResp := range polResp.Rules {
-			if ruleResp.Error != nil {
-				return report, fmt.Errorf("policy %s rule %s error: %w",
-					polResp.Policy.Name, ruleResp.Rule.Name, ruleResp.Error)
+			status := ruleResp.Status()
+			if status == engineapi.RuleStatusSkip {
+				continue
+			}
+			if status == engineapi.RuleStatusError {
+				return report, fmt.Errorf("policy %s rule %s error: %s",
+					polResp.Policy.GetName(), ruleResp.Name(), ruleResp.Message())
 			}
 			rr := ruleReport{
-				Policy:     polResp.Policy.Name,
-				Rule:       ruleResp.Rule.Name,
-				Identifier: ruleResp.Identifier,
+				Policy:     polResp.Policy.GetName(),
+				Rule:       ruleResp.Name(),
+				Identifier: identifier,
 				Status:     "pass",
 			}
-			if len(ruleResp.Violations) > 0 {
+			if status == engineapi.RuleStatusFail {
 				rr.Status = "fail"
 				report.Failures++
-				for _, v := range ruleResp.Violations {
-					rr.Messages = append(rr.Messages, v.Error())
+				if msg := ruleResp.Message(); msg != "" {
+					rr.Messages = append(rr.Messages, msg)
 				}
 			}
 			report.Rules = append(report.Rules, rr)
 		}
 	}
 	return report, nil
+}
+
+func extractResourceIdentifier(ev jsondiff.ChangeEvent) string {
+	for _, doc := range []map[string]any{ev.After, ev.Before} {
+		if meta, ok := doc["metadata"].(map[string]any); ok {
+			if name, ok := meta["name"].(string); ok && name != "" {
+				return name
+			}
+		}
+	}
+	return ev.ResourcePath
+}
+
+func loadValidatingPolicies(root string) ([]policiesv1beta1.ValidatingPolicyLike, error) {
+	files, err := collectYAMLFiles(root)
+	if err != nil {
+		return nil, err
+	}
+	var policies []policiesv1beta1.ValidatingPolicyLike
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			return nil, err
+		}
+		for _, doc := range splitYAMLDocuments(string(raw)) {
+			var pol policiesv1beta1.ValidatingPolicy
+			if err := yaml.Unmarshal([]byte(doc), &pol); err != nil {
+				return nil, fmt.Errorf("parsing policy %s: %w", f, err)
+			}
+			if pol.Kind != "ValidatingPolicy" {
+				continue
+			}
+			policies = append(policies, &pol)
+		}
+	}
+	return policies, nil
+}
+
+func collectYAMLFiles(root string) ([]string, error) {
+	info, err := os.Stat(root)
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() {
+		return []string{root}, nil
+	}
+	var files []string
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext == ".yaml" || ext == ".yml" {
+			files = append(files, path)
+		}
+		return nil
+	})
+	return files, err
+}
+
+func splitYAMLDocuments(content string) []string {
+	normalized := strings.ReplaceAll(content, "\r\n", "\n")
+	parts := strings.Split("\n"+normalized, "\n---")
+	var docs []string
+	for _, p := range parts {
+		trimmed := strings.TrimSpace(p)
+		if trimmed != "" {
+			docs = append(docs, trimmed)
+		}
+	}
+	return docs
 }
 
 func printTextReport(report evalReport) {

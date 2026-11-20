@@ -1,62 +1,96 @@
-apiVersion: json.kyverno.io/v1alpha1
+apiVersion: policies.kyverno.io/v1
 kind: ValidatingPolicy
 metadata:
-  name: postgres-gitops-guardrails
+  name: postgres-prod-create-requirements
 spec:
-  rules:
-    - name: postgres-prod-create-requirements
-      identifier: "after.metadata.name"
-      match:
-        all:
-          - operation: "create"
-            kind: "PostgresDatabase"
-            environment: "prod"
-      assert:
-        all:
-          - message: "New production PostgresDatabase must allocate at least 50 GB, enable Multi-AZ, encrypt storage, and keep >= 7 days of backups."
-            check:
-              after:
-                spec:
-                  (storageGB != `null` && storageGB >= `50`): true
-                  multiAZ: true
-                  encryptionEnabled: true
-                  (backupRetentionDays != `null` && backupRetentionDays >= `7`): true
-
-    - name: postgres-update-allowed-attributes
-      identifier: "after.metadata.name"
-      match:
-        all:
-          - operation: "update"
-            kind: "PostgresDatabase"
-      assert:
-        all:
-          - message: "PostgresDatabase update may only modify storageGB, instanceClass, backupRetentionDays, maintenanceWindow, or metadata.labels/*."
-            check:
-              diff:
-                ~.changes:
-                  (contains(['/spec/storageGB', '/spec/instanceClass', '/spec/backupRetentionDays', '/spec/maintenanceWindow'], path) || starts_with(path, '/metadata/labels/')): true
-
-    - name: postgres-no-disk-shrink
-      identifier: "after.metadata.name"
-      match:
-        all:
-          - operation: "update"
-            kind: "PostgresDatabase"
-      assert:
-        all:
-          - message: "PostgresDatabase storageGB cannot be decreased or removed after creation (after >= before)."
-            check:
-              (after.spec.storageGB != `null` && before.spec.storageGB != `null` && after.spec.storageGB >= before.spec.storageGB): true
-
-    - name: postgres-prod-backup-floor
-      identifier: "after.metadata.name"
-      match:
-        all:
-          - operation: "update"
-            kind: "PostgresDatabase"
-            environment: "prod"
-      assert:
-        all:
-          - message: "Production PostgresDatabase backupRetentionDays must remain >= 7."
-            check:
-              (after.spec.backupRetentionDays != `null` && after.spec.backupRetentionDays >= `7`): true
+  validationActions:
+    - Deny
+  evaluation:
+    mode: JSON
+  matchConditions:
+    - name: is-prod-postgres-create
+      expression: "object.operation == 'create' && object.kind == 'PostgresDatabase' && object.environment == 'prod'"
+  validations:
+    - message: "New production PostgresDatabase must allocate at least 50 GB, enable Multi-AZ, encrypt storage, and keep >= 7 days of backups."
+      expression: >-
+        has(object.after) &&
+        has(object.after.spec) &&
+        has(object.after.spec.storageGB) &&
+        object.after.spec.storageGB != null &&
+        object.after.spec.storageGB >= 50 &&
+        has(object.after.spec.multiAZ) &&
+        object.after.spec.multiAZ == true &&
+        has(object.after.spec.encryptionEnabled) &&
+        object.after.spec.encryptionEnabled == true &&
+        has(object.after.spec.backupRetentionDays) &&
+        object.after.spec.backupRetentionDays != null &&
+        object.after.spec.backupRetentionDays >= 7
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: postgres-update-allowed-attributes
+spec:
+  validationActions:
+    - Deny
+  evaluation:
+    mode: JSON
+  matchConditions:
+    - name: is-postgres-update
+      expression: "object.operation == 'update' && object.kind == 'PostgresDatabase'"
+  validations:
+    - message: "PostgresDatabase update may only modify storageGB, instanceClass, backupRetentionDays, maintenanceWindow, or metadata.labels/*."
+      expression: >-
+        !has(object.diff) ||
+        !has(object.diff.changes) ||
+        object.diff.changes == null ||
+        object.diff.changes.all(c,
+          c.path in ['/spec/storageGB', '/spec/instanceClass', '/spec/backupRetentionDays', '/spec/maintenanceWindow'] ||
+          c.path.startsWith('/metadata/labels/')
+        )
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: postgres-no-disk-shrink
+spec:
+  validationActions:
+    - Deny
+  evaluation:
+    mode: JSON
+  matchConditions:
+    - name: is-postgres-update
+      expression: "object.operation == 'update' && object.kind == 'PostgresDatabase'"
+  validations:
+    - message: "PostgresDatabase storageGB cannot be decreased or removed after creation (after >= before)."
+      expression: >-
+        has(object.after) &&
+        has(object.after.spec) &&
+        has(object.after.spec.storageGB) &&
+        object.after.spec.storageGB != null &&
+        has(object.before) &&
+        has(object.before.spec) &&
+        has(object.before.spec.storageGB) &&
+        object.before.spec.storageGB != null &&
+        object.after.spec.storageGB >= object.before.spec.storageGB
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: postgres-prod-backup-floor
+spec:
+  validationActions:
+    - Deny
+  evaluation:
+    mode: JSON
+  matchConditions:
+    - name: is-prod-postgres-update
+      expression: "object.operation == 'update' && object.kind == 'PostgresDatabase' && object.environment == 'prod'"
+  validations:
+    - message: "Production PostgresDatabase backupRetentionDays must remain >= 7."
+      expression: >-
+        has(object.after) &&
+        has(object.after.spec) &&
+        has(object.after.spec.backupRetentionDays) &&
+        object.after.spec.backupRetentionDays != null &&
+        object.after.spec.backupRetentionDays >= 7

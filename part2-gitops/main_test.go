@@ -5,9 +5,12 @@ import (
 	"os"
 	"testing"
 
-	"github.com/kyverno/kyverno-json/pkg/apis/policy/v1alpha1"
-	jsonengine "github.com/kyverno/kyverno-json/pkg/json-engine"
-	"github.com/kyverno/kyverno-json/pkg/policy"
+	policiesv1beta1 "github.com/kyverno/api/api/policies.kyverno.io/v1beta1"
+	celengine "github.com/kyverno/kyverno/pkg/cel/engine"
+	vpolcompiler "github.com/kyverno/kyverno/pkg/cel/policies/vpol/compiler"
+	vpolengine "github.com/kyverno/kyverno/pkg/cel/policies/vpol/engine"
+	engineapi "github.com/kyverno/kyverno/pkg/engine/api"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"kyverno-show/part2-gitops/internal/diffparse"
 	"kyverno-show/part2-gitops/internal/firstprinciples"
@@ -24,14 +27,17 @@ func evalBothEngines(t *testing.T, diffFile string, meta diffparse.Metadata) (ky
 	if err != nil {
 		t.Fatalf("toMap: %v", err)
 	}
-	policies, err := policy.Load("./policies")
+	policies, err := loadValidatingPolicies("./policies")
 	if err != nil {
 		t.Fatalf("load policies: %v", err)
 	}
 
-	kyvernoFails = countKyvernoJSONFailures(t, policies, payload)
+	kyvernoFails = countKyvernoCELFailures(t, policies, payload)
 
-	mini := firstprinciples.NewEngine()
+	mini, err := firstprinciples.NewEngine()
+	if err != nil {
+		t.Fatalf("mini NewEngine error: %v", err)
+	}
 	outcomes, err := mini.Evaluate(policies, payload)
 	if err != nil {
 		t.Fatalf("mini engine error: %v", err)
@@ -44,20 +50,29 @@ func evalBothEngines(t *testing.T, diffFile string, meta diffparse.Metadata) (ky
 	return kyvernoFails, miniFails
 }
 
-func countKyvernoJSONFailures(t *testing.T, policies []*v1alpha1.ValidatingPolicy, payload map[string]any) int {
+func countKyvernoCELFailures(t *testing.T, policies []*policiesv1beta1.ValidatingPolicy, payload map[string]any) int {
 	t.Helper()
-	eng := jsonengine.New()
-	resp := eng.Run(context.Background(), jsonengine.Request{
-		Resource: payload,
-		Policies: policies,
-	})
+	likes := make([]policiesv1beta1.ValidatingPolicyLike, len(policies))
+	for i, p := range policies {
+		likes[i] = p
+	}
+	provider, err := vpolengine.NewProvider(vpolcompiler.NewCompiler(), likes, nil)
+	if err != nil {
+		t.Fatalf("compile policies: %v", err)
+	}
+	eng := vpolengine.NewEngine(provider, nil, nil)
+	resp, err := eng.Handle(context.Background(), celengine.RequestFromJSON(nil, &unstructured.Unstructured{Object: payload}), nil)
+	if err != nil {
+		t.Fatalf("kyverno engine error: %v", err)
+	}
+
 	fails := 0
 	for _, polResp := range resp.Policies {
 		for _, ruleResp := range polResp.Rules {
-			if ruleResp.Error != nil {
-				t.Fatalf("rule %s error: %v", ruleResp.Rule.Name, ruleResp.Error)
+			if ruleResp.Status() == engineapi.RuleStatusError {
+				t.Fatalf("policy %s rule %s error: %s", polResp.Policy.GetName(), ruleResp.Name(), ruleResp.Message())
 			}
-			if len(ruleResp.Violations) > 0 {
+			if ruleResp.Status() == engineapi.RuleStatusFail {
 				fails++
 			}
 		}
@@ -72,7 +87,7 @@ func TestGitOpsDiffValidationParity(t *testing.T) {
 			Branch: "hotfix/break-prod",
 		})
 		if kFails != 4 || mFails != 4 {
-			t.Fatalf("expected 4 failed rules in both engines, got kyverno-json=%d mini=%d", kFails, mFails)
+			t.Fatalf("expected 4 failed policies in both engines, got kyverno=%d mini=%d", kFails, mFails)
 		}
 	})
 
@@ -83,7 +98,7 @@ func TestGitOpsDiffValidationParity(t *testing.T) {
 			CommitMessage: "chore(prod): bump payments image (CHG-4821)",
 		})
 		if kFails != 0 || mFails != 0 {
-			t.Fatalf("expected 0 failures in both engines, got kyverno-json=%d mini=%d", kFails, mFails)
+			t.Fatalf("expected 0 failures in both engines, got kyverno=%d mini=%d", kFails, mFails)
 		}
 	})
 
@@ -93,7 +108,7 @@ func TestGitOpsDiffValidationParity(t *testing.T) {
 			Branch: "feat/staging-scale-down",
 		})
 		if kFails != 0 || mFails != 0 {
-			t.Fatalf("expected 0 failures in both engines, got kyverno-json=%d mini=%d", kFails, mFails)
+			t.Fatalf("expected 0 failures in both engines, got kyverno=%d mini=%d", kFails, mFails)
 		}
 	})
 }

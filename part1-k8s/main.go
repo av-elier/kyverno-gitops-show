@@ -9,16 +9,19 @@ import (
 	"path/filepath"
 	"strings"
 
-	kyvernov1 "github.com/kyverno/kyverno/api/kyverno/v1"
-	"github.com/kyverno/kyverno/pkg/config"
-	"github.com/kyverno/kyverno/pkg/engine"
-	"github.com/kyverno/kyverno/pkg/engine/adapters"
+	policiesv1beta1 "github.com/kyverno/api/api/policies.kyverno.io/v1beta1"
+	celengine "github.com/kyverno/kyverno/pkg/cel/engine"
+	"github.com/kyverno/kyverno/pkg/cel/matching"
+	vpolcompiler "github.com/kyverno/kyverno/pkg/cel/policies/vpol/compiler"
+	vpolengine "github.com/kyverno/kyverno/pkg/cel/policies/vpol/engine"
 	engineapi "github.com/kyverno/kyverno/pkg/engine/api"
-	"github.com/kyverno/kyverno/pkg/engine/factories"
-	"github.com/kyverno/kyverno/pkg/engine/jmespath"
-	"github.com/kyverno/kyverno/pkg/imageverifycache"
-	"github.com/kyverno/kyverno/pkg/registryclient"
+	admissionv1 "k8s.io/api/admission/v1"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
+	authenticationv1 "k8s.io/api/authentication/v1"
+	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/yaml"
 )
 
@@ -32,11 +35,11 @@ type evalSummary struct {
 }
 
 func main() {
-	policyPath := flag.String("policy", "./policies", "Path to a ClusterPolicy YAML file or directory")
+	policyPath := flag.String("policy", "./policies", "Path to a ValidatingPolicy YAML file or directory")
 	manifestPath := flag.String("manifest", "./manifests/deployment-bad.yaml", "Path to a Kubernetes resource YAML file or directory")
 	flag.Parse()
 
-	policies, err := loadClusterPolicies(*policyPath)
+	policies, err := loadValidatingPolicies(*policyPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error loading policies: %v\n", err)
 		os.Exit(2)
@@ -61,7 +64,7 @@ func main() {
 		}
 	}
 
-	fmt.Printf("\nSummary: %d rule evaluations, %d enforced failures\n", len(summaries), enforcedFailures)
+	fmt.Printf("\nSummary: %d policy evaluations, %d enforced failures\n", len(summaries), enforcedFailures)
 	if enforcedFailures > 0 {
 		os.Exit(1)
 	}
@@ -69,52 +72,59 @@ func main() {
 
 func evaluatePolicies(
 	ctx context.Context,
-	policies []*kyvernov1.ClusterPolicy,
+	policies []policiesv1beta1.ValidatingPolicyLike,
 	resources []unstructured.Unstructured,
 ) ([]evalSummary, int, error) {
-	cfg := config.NewDefaultConfiguration(false)
-	jp := jmespath.New(cfg)
+	provider, err := vpolengine.NewProvider(vpolcompiler.NewCompiler(), policies, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("compiling validating policies: %w", err)
+	}
 
-	eng := engine.NewEngine(
-		cfg,
-		config.NewDefaultMetricsConfiguration(),
-		jp,
-		nil,
-		factories.DefaultRegistryClientFactory(adapters.RegistryClient(registryclient.NewOrDie()), nil),
-		imageverifycache.DisabledImageVerifyCache(),
-		factories.DefaultContextLoaderFactory(nil),
-		nil,
-	)
+	noopNsResolver := func(string) *corev1.Namespace { return nil }
+	eng := vpolengine.NewEngine(provider, noopNsResolver, matching.NewMatcher())
 
 	var summaries []evalSummary
 	enforcedFailures := 0
 
-	for _, res := range resources {
-		resLabel := fmt.Sprintf("%s/%s", res.GetKind(), res.GetName())
-		if ns := res.GetNamespace(); ns != "" {
-			resLabel = fmt.Sprintf("%s/%s/%s", res.GetKind(), ns, res.GetName())
+	for i := range resources {
+		res := resources[i]
+		resLabel := formatResourceLabel(res)
+		gvk := res.GroupVersionKind()
+		gvr, _ := apimeta.UnsafeGuessKindToResource(gvk)
+
+		req := celengine.Request(
+			nil,
+			gvk,
+			gvr,
+			"",
+			res.GetName(),
+			res.GetNamespace(),
+			admissionv1.Create,
+			authenticationv1.UserInfo{},
+			&res,
+			nil,
+			false,
+			nil,
+		)
+
+		resp, err := eng.Handle(ctx, req, nil)
+		if err != nil {
+			return nil, 0, fmt.Errorf("evaluating policies for %s: %w", resLabel, err)
 		}
 
-		for _, pol := range policies {
-			pCtx, err := engine.NewPolicyContext(jp, res, kyvernov1.Create, nil, cfg)
-			if err != nil {
-				return nil, 0, fmt.Errorf("creating policy context for %s: %w", resLabel, err)
-			}
-			pCtx = pCtx.WithPolicy(pol)
-
-			resp := eng.Validate(ctx, pCtx)
-			action := string(pol.Spec.ValidationFailureAction)
-			if action == "" {
-				action = string(kyvernov1.Audit)
-			}
-
-			for _, ruleResp := range resp.PolicyResponse.Rules {
+		for _, polResp := range resp.Policies {
+			action := formatValidationActions(polResp.Actions)
+			for _, ruleResp := range polResp.Rules {
 				status := ruleResp.Status()
-				if status == engineapi.RuleStatusFail && pol.Spec.ValidationFailureAction.Enforce() {
+				if status == engineapi.RuleStatusError {
+					return nil, 0, fmt.Errorf("policy %s rule %s error: %s",
+						polResp.Policy.GetName(), ruleResp.Name(), ruleResp.Message())
+				}
+				if status == engineapi.RuleStatusFail && polResp.Actions.Has(admissionregistrationv1.Deny) {
 					enforcedFailures++
 				}
 				summaries = append(summaries, evalSummary{
-					PolicyName: pol.GetName(),
+					PolicyName: polResp.Policy.GetName(),
 					Action:     action,
 					Resource:   resLabel,
 					RuleName:   ruleResp.Name(),
@@ -128,23 +138,43 @@ func evaluatePolicies(
 	return summaries, enforcedFailures, nil
 }
 
-func loadClusterPolicies(root string) ([]*kyvernov1.ClusterPolicy, error) {
+func formatResourceLabel(res unstructured.Unstructured) string {
+	if ns := res.GetNamespace(); ns != "" {
+		return fmt.Sprintf("%s/%s/%s", res.GetKind(), ns, res.GetName())
+	}
+	return fmt.Sprintf("%s/%s", res.GetKind(), res.GetName())
+}
+
+func formatValidationActions(actions sets.Set[admissionregistrationv1.ValidationAction]) string {
+	switch {
+	case actions.Has(admissionregistrationv1.Deny):
+		return string(admissionregistrationv1.Deny)
+	case actions.Has(admissionregistrationv1.Audit):
+		return string(admissionregistrationv1.Audit)
+	case actions.Has(admissionregistrationv1.Warn):
+		return string(admissionregistrationv1.Warn)
+	default:
+		return string(admissionregistrationv1.Audit)
+	}
+}
+
+func loadValidatingPolicies(root string) ([]policiesv1beta1.ValidatingPolicyLike, error) {
 	files, err := collectYAMLFiles(root)
 	if err != nil {
 		return nil, err
 	}
-	var policies []*kyvernov1.ClusterPolicy
+	var policies []policiesv1beta1.ValidatingPolicyLike
 	for _, f := range files {
 		raw, err := os.ReadFile(f)
 		if err != nil {
 			return nil, err
 		}
 		for _, doc := range splitYAMLDocuments(string(raw)) {
-			var pol kyvernov1.ClusterPolicy
+			var pol policiesv1beta1.ValidatingPolicy
 			if err := yaml.Unmarshal([]byte(doc), &pol); err != nil {
 				return nil, fmt.Errorf("parsing policy %s: %w", f, err)
 			}
-			if pol.Kind != "ClusterPolicy" {
+			if pol.Kind != "ValidatingPolicy" {
 				continue
 			}
 			policies = append(policies, &pol)
@@ -201,11 +231,12 @@ func collectYAMLFiles(root string) ([]string, error) {
 }
 
 func splitYAMLDocuments(content string) []string {
-	parts := strings.Split(content, "\n---")
+	normalized := strings.ReplaceAll(content, "\r\n", "\n")
+	parts := strings.Split("\n"+normalized, "\n---")
 	var docs []string
 	for _, p := range parts {
 		trimmed := strings.TrimSpace(p)
-		if trimmed != "" && trimmed != "---" {
+		if trimmed != "" {
 			docs = append(docs, trimmed)
 		}
 	}

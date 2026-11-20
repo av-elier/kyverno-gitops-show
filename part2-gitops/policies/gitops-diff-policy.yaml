@@ -1,57 +1,74 @@
-apiVersion: json.kyverno.io/v1alpha1
+apiVersion: policies.kyverno.io/v1
 kind: ValidatingPolicy
 metadata:
-  name: gitops-diff-guardrails
+  name: require-ticket-for-prod
 spec:
-  rules:
-    - name: require-ticket-for-prod
-      identifier: "metadata.branch"
-      match:
-        all:
-          - summary:
-              hasProdChanges: true
-      assert:
-        all:
-          - message: "Production GitOps changes require a valid changeTicket (CHG-#### or JIRA-####)."
-            check:
-              metadata:
-                (regex_match('^(CHG|JIRA)-[0-9]+$', changeTicket)): true
-
-    - name: forbid-zero-replicas-in-prod
-      identifier: "summary.environments[0]"
-      match:
-        all:
-          - summary:
-              hasProdChanges: true
-      assert:
-        all:
-          - message: "Scaling replicas to 0 in production manifests is forbidden."
-            check:
-              ~.files:
-                (environment == 'prod' && regex_match('(?m)^[[:space:]]*replicas:[[:space:]]*0([[:space:]]|$)', addedText)): false
-
-    - name: forbid-tls-disable-in-prod
-      identifier: "summary.environments[0]"
-      match:
-        all:
-          - summary:
-              hasProdChanges: true
-      assert:
-        all:
-          - message: "Disabling TLS (tlsEnabled: false) in production is forbidden."
-            check:
-              ~.files:
-                (environment == 'prod' && regex_match('(?i)tlsEnabled:[[:space:]]*false', addedText)): false
-
-    - name: forbid-hardcoded-secrets
-      identifier: "metadata.author"
-      match:
-        all:
-          - (summary.totalAdded > `0`): true
-      assert:
-        all:
-          - message: "Added diff lines must not contain hardcoded secrets, tokens, or passwords."
-            check:
-              ~.files:
-                ~.addedLines:
-                  (regex_match('(?i)(ghp_[A-Za-z0-9]{8,}|AKIA[0-9A-Z]{8,}|(password|secret|api_key|token)[[:space:]]*[:=][[:space:]]*["\x27]?[A-Za-z0-9_\\-]{6,})', @)): false
+  validationActions:
+    - Deny
+  evaluation:
+    mode: JSON
+  matchConditions:
+    - name: has-prod-changes
+      expression: "has(object.summary) && object.summary.hasProdChanges == true"
+  validations:
+    - message: "Production GitOps changes require a valid changeTicket (CHG-#### or JIRA-####)."
+      expression: >-
+        has(object.metadata) &&
+        has(object.metadata.changeTicket) &&
+        object.metadata.changeTicket.matches('^(CHG|JIRA)-[0-9]+$')
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: forbid-zero-replicas-in-prod
+spec:
+  validationActions:
+    - Deny
+  evaluation:
+    mode: JSON
+  matchConditions:
+    - name: has-prod-changes
+      expression: "has(object.summary) && object.summary.hasProdChanges == true"
+  validations:
+    - message: "Scaling replicas to 0 in production manifests is forbidden."
+      expression: >-
+        has(object.files) &&
+        object.files.all(f, !(f.environment == 'prod' && f.addedText.matches('(?m)^[[:space:]]*replicas:[[:space:]]*0([[:space:]]|$)')))
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: forbid-tls-disable-in-prod
+spec:
+  validationActions:
+    - Deny
+  evaluation:
+    mode: JSON
+  matchConditions:
+    - name: has-prod-changes
+      expression: "has(object.summary) && object.summary.hasProdChanges == true"
+  validations:
+    - message: "Disabling TLS (tlsEnabled: false) in production is forbidden."
+      expression: >-
+        has(object.files) &&
+        object.files.all(f, !(f.environment == 'prod' && f.addedText.matches('(?i)tlsEnabled:[[:space:]]*false')))
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: forbid-hardcoded-secrets
+spec:
+  validationActions:
+    - Deny
+  evaluation:
+    mode: JSON
+  matchConditions:
+    - name: has-added-lines
+      expression: "has(object.summary) && object.summary.totalAdded > 0"
+  validations:
+    - message: "Added diff lines must not contain hardcoded secrets, tokens, or passwords."
+      expression: >-
+        has(object.files) &&
+        object.files.all(f, f.addedLines.all(line,
+          !line.matches('(?i)(ghp_[A-Za-z0-9]{8,}|AKIA[0-9A-Z]{8,}|(password|secret|api_key|token)[[:space:]]*[:=][[:space:]]*["\x27]?[A-Za-z0-9_\\-]{6,})')
+        ))
